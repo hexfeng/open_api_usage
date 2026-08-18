@@ -8,14 +8,19 @@
 4. SQLite schema, Windows credential references and official API adapters implemented.
 5. Independent scheduler, exponential backoff, tray and autostart implemented.
 6. Unit, component, static-host and browser interaction checks implemented.
+7. Dynamic summaries, cached last-success recovery and real seven-day history reads implemented.
+8. Account edit/persistent disable and SQLite-backed refresh, tray and retention settings implemented.
+9. ChatGPT/Codex app-server subscription quota implemented and live-validated on Windows.
+10. Google split into Google AI Studio API and Gemini CLI subscription accounts, with separate credentials, scope and diagnostics.
 
 ## External acceptance still required
 
-- Compare each official adapter against the user's real provider dashboard.
+- Reconcile each rendered metric value and time window against the user's official provider dashboard; live authentication/display is confirmed.
 - Validate invalid credential, permission, rate-limit and network failures with real accounts.
 - Run a seven-day private beta and retain 30 days of continuous history for long-term acceptance.
-- Approve a Windows-safe Codex quota connector.
-- Approve explicit browser-session consent and domain allowlist behavior before enabling Gemini experimental reads.
+- Install and sign in to Gemini CLI, then reconcile its live per-model quota against `/stats model`.
+- Reconcile Google AI Studio API usage manually because the public API-key endpoint does not expose AI Studio spend or prepaid balance.
+- Complete a restart-while-offline manual check using the connected accounts to confirm cached values remain visible as Stale.
 
 ## Release checklist
 

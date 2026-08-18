@@ -7,11 +7,16 @@ Local-first Windows desktop dashboard for monitoring personal AI API accounts an
 - Windows 11 desktop shell: Tauri 2 + React/TypeScript + Rust.
 - Dashboard, Accounts and Settings only.
 - Dark/light themes and list/card provider layouts, persisted locally.
-- Official API adapters for OpenAI organization usage, DeepSeek balance and OpenRouter key/account usage.
+- Official API adapters for OpenAI organization usage, DeepSeek balance, OpenRouter key/account usage and Google AI Studio API-key validation.
+- Local subscription adapters for ChatGPT/Codex app-server quota and Gemini CLI OAuth model quota.
 - SQLite metrics/history with balance snapshots separated from provider history buckets.
 - Secrets stored in Windows Credential Manager; SQLite stores only credential references.
 - Per-account scheduling, provider timeouts, exponential backoff, tray residency and start-on-login.
-- Codex and Gemini subscription scopes are represented explicitly and never described as full ChatGPT or Google AI entitlement usage.
+- Cached last-success recovery, provider/local history trends and stale diagnostics across restarts.
+- Dynamic multi-currency balance, month-to-date spend and reporting-coverage summaries.
+- Persisted account enablement, credential replacement and refresh/history/Windows behavior settings.
+- Google AI Studio API and Gemini CLI subscription accounts are stored and displayed separately.
+- Codex and Gemini subscription scopes are explicit and never described as full ChatGPT or Google AI entitlement usage.
 
 ## Run
 
@@ -39,6 +44,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Security boundary
 
-The application is read-only toward providers. It does not proxy API traffic, manage provider keys, rotate credentials, recharge accounts or log prompt/request content. Browser-session connectors require a separate explicit-consent implementation before they may read a domain-scoped session; raw cookies must never enter SQLite or logs.
+The application is read-only toward providers. It does not proxy API traffic, manage provider keys, rotate credentials, recharge accounts or log prompt/request content. Codex is queried through its local read-only app-server. Gemini CLI OAuth is read only after the user explicitly adds that account; raw OAuth credentials never enter SQLite or logs.
 
 See [Capability Matrix](docs/CAPABILITY_MATRIX.md), [Architecture](docs/ARCHITECTURE.md), and [Development Plan](docs/DEVELOPMENT.md).

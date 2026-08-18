@@ -15,11 +15,21 @@ export type MetricSource =
   | "Browser session · Experimental"
   | "Manual";
 
+export type ProviderId =
+  | "openai"
+  | "deepseek"
+  | "openrouter"
+  | "google-ai-studio"
+  | "chatgpt-codex"
+  | "google-gemini-cli";
+
 export interface Metric {
   id: string;
   label: string;
   value: string;
-  kind: "money" | "tokens" | "requests" | "quota";
+  numericValue: number;
+  metricKind: string;
+  kind: "money" | "tokens" | "requests" | "quota" | "count";
   unit?: string;
   currency?: "USD" | "CNY";
   scope: string;
@@ -31,9 +41,9 @@ export interface Metric {
 
 export interface ProviderAccount {
   id: string;
-  provider: "openai" | "deepseek" | "openrouter";
+  provider: ProviderId;
   name: string;
-  type: "API Platform";
+  type: "API Platform" | "Subscription";
   status: Status;
   source: MetricSource;
   scope: string;
@@ -41,25 +51,20 @@ export interface ProviderAccount {
   updatedAt: string;
   officialUrl: string;
   credentialHint: string;
+  credentialKind?: string;
   enabled: boolean;
   metrics: Metric[];
   history: number[];
+  historyLabel: string;
+  historyBasis: string;
+  lastError?: string;
+  diagnostic?: string;
+  plan?: string;
+  monthlyPrice?: string;
+  renewalDate?: string;
 }
 
-export interface SubscriptionAccount {
-  id: string;
-  provider: "chatgpt" | "gemini";
-  name: string;
-  plan: string;
-  status: Status;
-  source: MetricSource;
-  scope: string;
-  updatedLabel: string;
-  officialUrl: string;
-  monthlyPrice: string;
-  renewalDate: string;
-  metrics: Metric[];
-}
+export type SubscriptionAccount = ProviderAccount;
 
 export interface AppSettings {
   apiRefreshMinutes: number;

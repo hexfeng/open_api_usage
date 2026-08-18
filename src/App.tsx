@@ -9,6 +9,7 @@ import {
   GearSix,
   ListBullets,
   Moon,
+  PencilSimple,
   Plus,
   ArrowClockwise,
   ShieldCheck,
@@ -18,19 +19,24 @@ import {
   Trash,
   X,
 } from "@phosphor-icons/react";
-import { siDeepseek, siGooglegemini, siOpenrouter } from "simple-icons";
+import { siDeepseek, siGoogle, siGooglegemini, siOpenrouter } from "simple-icons";
 import { defaultSettings, demoProviders, demoSubscriptions } from "./demoData";
 import {
   isTauri,
   deleteAllLocalData,
+  listenForAccountUpdates,
+  loadAppSettings,
   loadConnectedAccounts,
   openOfficialUrl,
   refreshConnectedAccount,
   removeConnectedAccount,
+  saveAppSettings,
   saveConnectedAccount,
-  setStartOnLogin,
+  setConnectedAccountEnabled,
   testConnection,
+  updateConnectedAccount,
   type AccountRequest,
+  type UpdateAccountRequest,
 } from "./bridge";
 import type {
   AppSettings,
@@ -38,6 +44,7 @@ import type {
   Metric,
   Page,
   ProviderAccount,
+  ProviderId,
   Status,
   SubscriptionAccount,
   Theme,
@@ -57,10 +64,11 @@ export function App() {
   const [page, setPage] = useState<Page>(() => storedValue("aud-page", "dashboard"));
   const [theme, setTheme] = useState<Theme>(() => storedValue("aud-theme", "dark"));
   const [layout, setLayout] = useState<LayoutMode>(() => storedValue("aud-layout", "list"));
-  const [providers, setProviders] = useState(() => isTauri ? [] : demoProviders);
-  const [subscriptions] = useState(() => isTauri ? [] : demoSubscriptions);
+  const [accounts, setAccounts] = useState<ProviderAccount[]>(() => isTauri ? [] : [...demoProviders, ...demoSubscriptions]);
   const [settings, setSettings] = useState(defaultSettings);
-  const [selected, setSelected] = useState<ProviderAccount | null>(null);
+  const [settingsError, setSettingsError] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<ProviderAccount | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [isRefreshing, setRefreshing] = useState(false);
 
@@ -74,21 +82,51 @@ export function App() {
 
   useEffect(() => {
     if (!isTauri) return;
-    loadConnectedAccounts().then(setProviders).catch(() => setProviders([]));
+    let active = true;
+    let stopListening: (() => void) | undefined;
+    const replaceAccount = (updated: ProviderAccount) => {
+      if (!active) return;
+      setAccounts((items) => items.map((item) => item.id === updated.id ? updated : item));
+    };
+    void listenForAccountUpdates(replaceAccount).then((stop) => {
+      if (active) stopListening = stop;
+      else stop();
+    });
+    void loadConnectedAccounts()
+      .then((cached) => {
+        if (!active) return;
+        setAccounts(cached);
+        return Promise.all(cached.filter((account) => account.enabled).map(refreshConnectedAccount));
+      })
+      .then((fresh) => {
+        if (active && fresh) setAccounts((items) => items.map((item) => fresh.find((next) => next.id === item.id) ?? item));
+      })
+      .catch(() => undefined);
+    void loadAppSettings().then((value) => { if (active) setSettings(value); }).catch((reason) => {
+      if (active) setSettingsError(String(reason));
+    });
+    return () => {
+      active = false;
+      stopListening?.();
+    };
   }, []);
+
+  const providers = accounts.filter((account) => account.type === "API Platform");
+  const subscriptions = accounts.filter((account) => account.type === "Subscription");
+  const selected = selectedId ? accounts.find((account) => account.id === selectedId) ?? null : null;
 
   const refreshAll = async () => {
     if (isRefreshing) return;
     setRefreshing(true);
-    setProviders((items) => items.map((item) => ({ ...item, status: "Refreshing" })));
+    setAccounts((items) => items.map((item) => item.enabled ? { ...item, status: "Refreshing" } : item));
     if (isTauri) {
-      const refreshed = await Promise.all(providers.map(refreshConnectedAccount));
-      setProviders(refreshed);
+      const refreshed = await Promise.all(accounts.filter((account) => account.enabled).map(refreshConnectedAccount));
+      setAccounts((items) => items.map((item) => refreshed.find((next) => next.id === item.id) ?? item));
       setRefreshing(false);
       return;
     }
     window.setTimeout(() => {
-      setProviders((items) =>
+      setAccounts((items) =>
         items.map((item, index) => ({
           ...item,
           status: index === 2 ? "Stale" : "Live",
@@ -116,7 +154,7 @@ export function App() {
             refreshing={isRefreshing}
             onLayoutChange={setLayout}
             onRefresh={() => void refreshAll()}
-            onSelect={setSelected}
+            onSelect={(account) => setSelectedId(account.id)}
           />
         )}
         {page === "accounts" && (
@@ -124,30 +162,45 @@ export function App() {
             providers={providers}
             subscriptions={subscriptions}
             onAdd={() => setAddOpen(true)}
-            onToggle={(id) =>
-              setProviders((items) =>
-                items.map((item) => (item.id === id ? { ...item, enabled: !item.enabled } : item)),
-              )
-            }
+            onToggle={(id, enabled) => {
+              if (!isTauri) {
+                setAccounts((items) => items.map((item) => item.id === id ? { ...item, enabled } : item));
+                return;
+              }
+              void setConnectedAccountEnabled(id, enabled).then((updated) => {
+                setAccounts((items) => items.map((item) => item.id === id ? updated : item));
+              });
+            }}
+            onEdit={setEditing}
             onDelete={async (id) => {
               await removeConnectedAccount(id);
-              setProviders((items) => items.filter((item) => item.id !== id));
+              setAccounts((items) => items.filter((item) => item.id !== id));
             }}
           />
         )}
         {page === "settings" && (
           <SettingsPage
             settings={settings}
+            error={settingsError}
             onChange={(next) => {
-              if (next.startOnLogin !== settings.startOnLogin) void setStartOnLogin(next.startOnLogin);
+              const previous = settings;
               setSettings(next);
+              setSettingsError("");
+              if (isTauri) void saveAppSettings(next).then(setSettings).catch((reason) => {
+                setSettings(previous);
+                setSettingsError(String(reason));
+              });
             }}
-            onDeleteData={async () => { await deleteAllLocalData(); setProviders([]); }}
+            onDeleteData={async () => { await deleteAllLocalData(); setAccounts([]); }}
           />
         )}
       </main>
-      {selected && <DetailPanel account={selected} onClose={() => setSelected(null)} />}
-      {addOpen && <AddAccountDialog onClose={() => setAddOpen(false)} onSaved={(account) => setProviders((items) => [...items, account])} />}
+      {selected && <DetailPanel account={selected} onClose={() => setSelectedId(null)} />}
+      {addOpen && <AddAccountDialog onClose={() => setAddOpen(false)} onSaved={(account) => setAccounts((items) => [...items, account])} />}
+      {editing && <EditAccountDialog account={editing} onClose={() => setEditing(null)} onSaved={(account) => {
+        setAccounts((items) => items.map((item) => item.id === account.id ? account : item));
+        setEditing(null);
+      }} />}
     </div>
   );
 }
@@ -217,12 +270,42 @@ function Dashboard({
   onRefresh: () => void;
   onSelect: (account: ProviderAccount) => void;
 }) {
+  const balanceByCurrency = new Map<string, number>();
+  let balanceCoverage = 0;
+  let spend = 0;
+  let spendCoverage = 0;
+  let reporting = 0;
+  for (const provider of providers) {
+    if (provider.metrics.length) reporting += 1;
+    const balance = provider.metrics.find((metric) => metric.metricKind === "total_balance" || metric.metricKind === "remaining_credits");
+    if (balance?.currency) {
+      balanceByCurrency.set(balance.currency, (balanceByCurrency.get(balance.currency) ?? 0) + balance.numericValue);
+      balanceCoverage += 1;
+    }
+    const monthlySpend = provider.metrics.find((metric) => metric.metricKind === "cost");
+    if (monthlySpend?.currency === "USD") {
+      spend += monthlySpend.numericValue;
+      spendCoverage += 1;
+    }
+  }
+  const balances = ["USD", "CNY"]
+    .filter((currency) => balanceByCurrency.has(currency))
+    .map((currency) => `${currency === "CNY" ? "¥" : "$"}${balanceByCurrency.get(currency)!.toFixed(2)}`)
+    .join(" · ") || "—";
+  const live = providers.filter((provider) => provider.status === "Live").length;
+  const stale = providers.filter((provider) => provider.status === "Stale").length;
+  const latest = providers
+    .flatMap((provider) => provider.metrics.map((metric) => metric.observedAt))
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  const updated = latest
+    ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(latest))
+    : "No successful refresh yet";
   return (
     <>
       <section className="page-heading">
         <div>
           <h1>AI Usage Dashboard</h1>
-          <p>Last updated Aug 17, 2026 · 2:30 PM</p>
+          <p>Last updated {updated}</p>
         </div>
         <div className="heading-actions">
           <button className="button secondary" onClick={onRefresh} disabled={refreshing}>
@@ -235,9 +318,9 @@ function Dashboard({
       <div className="dashboard-grid">
         <div className="dashboard-main-column">
           <section className="summary-grid" aria-label="Account summary">
-            <SummaryBlock label="USD spend" value="$42.18" meta="2 of 3 accounts" accent="blue" />
-            <SummaryBlock label="CNY balance" value="¥82.31" meta="1 of 3 accounts" accent="violet" />
-            <SummaryBlock label="Data coverage" value="5 connected" meta="3 API · 2 subscriptions" accent="green" />
+            <SummaryBlock label="API balance" value={balances} meta={`${balanceCoverage} of ${providers.length} accounts reporting balance`} accent="blue" />
+            <SummaryBlock label="USD spend · MTD" value={spendCoverage ? `$${spend.toFixed(2)}` : "—"} meta={`${spendCoverage} of ${providers.length} accounts reporting monthly spend`} accent="violet" />
+            <SummaryBlock label="Data coverage" value={`${reporting}/${providers.length || 0}`} meta={`${live} live · ${stale} stale`} accent="green" />
           </section>
           <section className="content-section api-section">
             <div className="section-heading">
@@ -264,7 +347,7 @@ function Dashboard({
           </div>
           <div className="subscription-stack">
             {subscriptions.map((subscription) => (
-              <SubscriptionCard key={subscription.id} account={subscription} />
+              <SubscriptionCard key={subscription.id} account={subscription} onSelect={onSelect} />
             ))}
           </div>
           <p className="scope-footnote"><ShieldCheck /> Automatic quota data covers the named CLI product only.</p>
@@ -338,9 +421,9 @@ function MetricValue({ metric }: { metric: Metric }) {
   );
 }
 
-function SubscriptionCard({ account }: { account: SubscriptionAccount }) {
+function SubscriptionCard({ account, onSelect }: { account: SubscriptionAccount; onSelect: (account: ProviderAccount) => void }) {
   return (
-    <article className="subscription-card">
+    <article className="subscription-card" onClick={() => onSelect(account)}>
       <div className="subscription-head">
         <div className="provider-identity compact">
           <ProviderLogo provider={account.provider} />
@@ -350,7 +433,7 @@ function SubscriptionCard({ account }: { account: SubscriptionAccount }) {
       </div>
       <div className="source-line"><SourceBadge source={account.source} /><span>{account.scope}</span></div>
       <div className="quota-stack">
-        {account.metrics.map((metric) => {
+        {account.metrics.filter((metric) => metric.kind === "quota").map((metric) => {
           const value = Number.parseInt(metric.value, 10);
           return (
             <div className="quota" key={metric.id}>
@@ -361,15 +444,15 @@ function SubscriptionCard({ account }: { account: SubscriptionAccount }) {
           );
         })}
       </div>
-      <div className="plan-line"><span>{account.monthlyPrice}</span><span>{account.renewalDate}</span><em>Manual</em></div>
+      <div className="plan-line"><span>{account.monthlyPrice || "Price not set"}</span><span>{account.renewalDate || "Renewal not set"}</span><em>Manual</em></div>
       <div className="subscription-foot"><span>Updated {account.updatedLabel}</span><OfficialLink href={account.officialUrl} compact /></div>
     </article>
   );
 }
 
 function ProviderLogo({ provider }: { provider: ProviderAccount["provider"] | SubscriptionAccount["provider"] }) {
-  const icon = provider === "deepseek" ? siDeepseek : provider === "openrouter" ? siOpenrouter : provider === "gemini" ? siGooglegemini : null;
-  const tone = provider === "deepseek" ? "#4d7cff" : provider === "openrouter" ? "#8a74ff" : provider === "gemini" ? "#6b8cff" : "#67a5ff";
+  const icon = provider === "deepseek" ? siDeepseek : provider === "openrouter" ? siOpenrouter : provider === "google-gemini-cli" ? siGooglegemini : provider === "google-ai-studio" ? siGoogle : null;
+  const tone = provider === "deepseek" ? "#4d7cff" : provider === "openrouter" ? "#8a74ff" : provider.startsWith("google-") ? "#6b8cff" : "#67a5ff";
   return (
     <span className={`provider-logo ${provider}`} style={{ color: tone }} aria-hidden="true">
       {icon ? <svg viewBox="0 0 24 24"><path d={icon.path} fill="currentColor" /></svg> : <Atom weight="duotone" />}
@@ -398,12 +481,14 @@ function AccountsPage({
   subscriptions,
   onAdd,
   onToggle,
+  onEdit,
   onDelete,
 }: {
   providers: ProviderAccount[];
   subscriptions: SubscriptionAccount[];
   onAdd: () => void;
-  onToggle: (id: string) => void;
+  onToggle: (id: string, enabled: boolean) => void;
+  onEdit: (account: ProviderAccount) => void;
   onDelete: (id: string) => void;
 }) {
   return (
@@ -420,7 +505,8 @@ function AccountsPage({
               <div className="provider-identity"><ProviderLogo provider={account.provider} /><div><h3>{account.name}</h3><p>{account.credentialHint}</p></div></div>
               <div className="account-source"><SourceBadge source={account.source} /><small>{account.scope}</small></div>
               <StatusBadge status={account.enabled ? account.status : "Unavailable"} />
-              <label className="switch"><input type="checkbox" checked={account.enabled} onChange={() => onToggle(account.id)} /><span /></label>
+              <label className="switch"><input type="checkbox" checked={account.enabled} onChange={(event) => onToggle(account.id, event.target.checked)} aria-label={`Enable ${account.name}`} /><span /></label>
+              <button className="icon-button" onClick={() => onEdit(account)} aria-label={`Edit ${account.name}`}><PencilSimple /></button>
               <button className="icon-button danger" onClick={() => onDelete(account.id)} aria-label={`Delete ${account.name}`}><Trash /></button>
             </div>
           ))}
@@ -428,13 +514,15 @@ function AccountsPage({
       </section>
       <section className="accounts-panel">
         <div className="accounts-panel-head"><h2>Subscriptions</h2><span>{subscriptions.length} connected</span></div>
-        <div className="accounts-table">
+        <div className="accounts-table" role="table" aria-label="Subscription accounts">
           {subscriptions.map((account) => (
-            <div className="account-line subscription-line" key={account.id}>
+            <div className="account-line" role="row" key={account.id}>
               <div className="provider-identity"><ProviderLogo provider={account.provider} /><div><h3>{account.name}</h3><p>{account.plan}</p></div></div>
-              <div className="account-source"><SourceBadge source={account.source} /><small>{account.scope}</small></div>
-              <StatusBadge status={account.status} />
-              <span className="manual-plan">{account.monthlyPrice} · {account.renewalDate}</span>
+              <div className="account-source"><SourceBadge source={account.source} /><small>{account.scope} · {account.monthlyPrice || "Price not set"}</small></div>
+              <StatusBadge status={account.enabled ? account.status : "Unavailable"} />
+              <label className="switch"><input type="checkbox" checked={account.enabled} onChange={(event) => onToggle(account.id, event.target.checked)} aria-label={`Enable ${account.name}`} /><span /></label>
+              <button className="icon-button" onClick={() => onEdit(account)} aria-label={`Edit ${account.name}`}><PencilSimple /></button>
+              <button className="icon-button danger" onClick={() => onDelete(account.id)} aria-label={`Delete ${account.name}`}><Trash /></button>
             </div>
           ))}
         </div>
@@ -443,12 +531,13 @@ function AccountsPage({
   );
 }
 
-function SettingsPage({ settings, onChange, onDeleteData }: { settings: AppSettings; onChange: (settings: AppSettings) => void; onDeleteData: () => Promise<void> }) {
+function SettingsPage({ settings, error, onChange, onDeleteData }: { settings: AppSettings; error: string; onChange: (settings: AppSettings) => void; onDeleteData: () => Promise<void> }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => onChange({ ...settings, [key]: value });
   return (
     <>
       <section className="page-heading compact-heading"><div><p className="eyebrow">LOCAL APP</p><h1>Settings</h1><p>Refresh behavior, Windows startup and local data.</p></div></section>
+      {error ? <p className="form-error settings-error" role="alert">{error}</p> : null}
       <div className="settings-layout">
         <section className="settings-card">
           <div className="settings-title"><ArrowClockwise /><div><h2>Refresh schedule</h2><p>Each provider refreshes independently with exponential backoff.</p></div></div>
@@ -485,7 +574,7 @@ function SettingToggle({ label, description, checked, onChange }: { label: strin
 }
 
 function DetailPanel({ account, onClose }: { account: ProviderAccount; onClose: () => void }) {
-  const max = Math.max(...account.history);
+  const max = Math.max(...account.history, 0);
   return (
     <div className="panel-backdrop" onMouseDown={onClose}>
       <aside className="detail-panel" onMouseDown={(event) => event.stopPropagation()} aria-label={`${account.name} details`}>
@@ -493,8 +582,9 @@ function DetailPanel({ account, onClose }: { account: ProviderAccount; onClose: 
         <div className="provider-identity detail-identity"><ProviderLogo provider={account.provider} /><div><p className="eyebrow">ACCOUNT DETAIL</p><h2>{account.name}</h2><p>{account.scope}</p></div></div>
         <StatusBadge status={account.status} />
         <div className="detail-metrics">{account.metrics.map((metric) => <MetricValue key={metric.id} metric={metric} />)}</div>
-        <section className="trend-section"><div><h3>7-day local trend</h3><span>Snapshots, not derived spend</span></div><div className="mini-chart" aria-label="Seven day trend">{account.history.map((value, index) => <span key={index} style={{ height: `${Math.max(18, (value / max) * 100)}%` }} />)}</div></section>
-        <section className="diagnostic"><h3>Source diagnostic</h3><dl><div><dt>Strategy</dt><dd>{account.source}</dd></div><div><dt>Credential</dt><dd>{account.credentialHint}</dd></div><div><dt>Last observed</dt><dd>{account.updatedAt}</dd></div><div><dt>Failure behavior</dt><dd>Keep last success and mark Stale</dd></div></dl></section>
+        <section className="trend-section"><div><h3>{account.historyLabel}</h3><span>{account.historyBasis}</span></div>{account.history.length ? <div className="mini-chart" aria-label="Seven day trend">{account.history.map((value, index) => <span key={index} style={{ height: `${Math.max(18, max ? (value / max) * 100 : 18)}%` }} />)}</div> : <p className="history-empty">History starts after the first stored refresh.</p>}</section>
+        <section className="diagnostic"><h3>Source diagnostic</h3><dl><div><dt>Strategy</dt><dd>{account.source}</dd></div><div><dt>Credential</dt><dd>{account.credentialHint}</dd></div><div><dt>Last observed</dt><dd>{account.updatedAt}</dd></div>{account.type === "Subscription" ? <div><dt>Plan metadata</dt><dd>{account.plan || "Not set"} · Manual</dd></div> : null}<div><dt>Failure behavior</dt><dd>Keep last success and mark Stale</dd></div></dl>{account.diagnostic ? <p>{account.diagnostic}</p> : null}</section>
+        {account.lastError ? <p className="form-error" role="alert">{account.lastError}</p> : null}
         <OfficialLink href={account.officialUrl} />
       </aside>
     </div>
@@ -504,12 +594,25 @@ function DetailPanel({ account, onClose }: { account: ProviderAccount; onClose: 
 function AddAccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: (account: ProviderAccount) => void }) {
   const [testing, setTesting] = useState(false);
   const [tested, setTested] = useState(false);
-  const [providerId, setProviderId] = useState<ProviderAccount["provider"]>("openai");
+  const [providerId, setProviderId] = useState<ProviderId>("openai");
   const [displayName, setDisplayName] = useState("Personal account");
   const [credential, setCredential] = useState("");
   const [credentialKind, setCredentialKind] = useState("api_key");
+  const [planName, setPlanName] = useState("");
+  const [monthlyPrice, setMonthlyPrice] = useState("");
+  const [renewalDate, setRenewalDate] = useState("");
   const [error, setError] = useState("");
-  const request: AccountRequest = { providerId, displayName, credential, credentialKind };
+  const subscription = providerId === "chatgpt-codex" || providerId === "google-gemini-cli";
+  const secretRequired = !subscription;
+  const request: AccountRequest = {
+    providerId,
+    displayName,
+    credential,
+    credentialKind: providerId === "openrouter" ? credentialKind : providerId === "openai" ? "admin" : subscription ? "local_oauth" : "api_key",
+    planName: subscription ? planName : undefined,
+    monthlyPrice: subscription ? monthlyPrice : undefined,
+    renewalDate: subscription ? renewalDate : undefined,
+  };
   const test = async () => {
     setTesting(true); setError(""); setTested(false);
     try {
@@ -522,7 +625,8 @@ function AddAccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: 
   const save = async () => {
     setTesting(true); setError("");
     try {
-      const account = isTauri ? await saveConnectedAccount(request) : { ...demoProviders.find((item) => item.provider === providerId)!, id: crypto.randomUUID(), name: displayName };
+      const demo = [...demoProviders, ...demoSubscriptions].find((item) => item.provider === providerId);
+      const account = isTauri ? await saveConnectedAccount(request) : { ...demo!, id: crypto.randomUUID(), name: displayName, plan: planName || demo?.plan, monthlyPrice: monthlyPrice || demo?.monthlyPrice, renewalDate: renewalDate || demo?.renewalDate };
       onSaved(account); onClose();
     } catch (reason) { setError(String(reason)); setTesting(false); }
   };
@@ -530,15 +634,64 @@ function AddAccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: 
     <div className="dialog-backdrop" onMouseDown={onClose}>
       <form className="dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <button type="button" className="panel-close" onClick={onClose} aria-label="Close"><X /></button>
-        <p className="eyebrow">READ-ONLY CONNECTION</p><h2>Add API account</h2><p className="dialog-copy">Credentials are stored in Windows Credential Manager. SQLite stores only a reference.</p>
-        <label>Provider<select value={providerId} onChange={(event) => { setProviderId(event.target.value as ProviderAccount["provider"]); setTested(false); }}><option value="openai">OpenAI API</option><option value="deepseek">DeepSeek API</option><option value="openrouter">OpenRouter</option></select></label>
+        <p className="eyebrow">READ-ONLY CONNECTION</p><h2>Add account</h2><p className="dialog-copy">API secrets use Windows Credential Manager. Local subscriptions reuse the provider CLI login without copying tokens into this app.</p>
+        <label>Provider<select value={providerId} onChange={(event) => { const next = event.target.value as ProviderId; setProviderId(next); setTested(false); setError(""); }}><option value="openai">OpenAI API</option><option value="deepseek">DeepSeek API</option><option value="openrouter">OpenRouter</option><option value="google-ai-studio">Google AI Studio API</option><option value="chatgpt-codex">ChatGPT / Codex subscription</option><option value="google-gemini-cli">Google / Gemini CLI subscription · Experimental</option></select></label>
         {providerId === "openrouter" && <label>Credential scope<select value={credentialKind} onChange={(event) => { setCredentialKind(event.target.value); setTested(false); }}><option value="api_key">API key · key-level usage</option><option value="management">Management · account credits</option></select></label>}
         <label>Account name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Personal account" /></label>
-        <label>{providerId === "openai" ? "Admin credential" : "Credential"}<input value={credential} onChange={(event) => { setCredential(event.target.value); setTested(false); }} type="password" placeholder="Paste credential" autoComplete="off" /></label>
+        {secretRequired ? <label>{providerId === "openai" ? "Admin credential" : "API key"}<input value={credential} onChange={(event) => { setCredential(event.target.value); setTested(false); }} type="password" placeholder="Paste credential" autoComplete="off" /></label> : null}
         {providerId === "openai" && <p className="field-help">Organization usage requires an Admin Key; a normal API key is not treated as a balance credential.</p>}
-        <div className="consent-note"><ShieldCheck />The credential is never written to app logs or the local database.</div>
+        {providerId === "google-ai-studio" && <p className="field-help">The key validates project API access. Google exposes usage, spend and prepaid balance in AI Studio, not through the public API-key endpoint.</p>}
+        {subscription ? <><label>Plan name · Manual<input value={planName} onChange={(event) => setPlanName(event.target.value)} placeholder={providerId === "chatgpt-codex" ? "ChatGPT Plus" : "Google AI Pro"} /></label><label>Monthly price · Manual<input value={monthlyPrice} onChange={(event) => setMonthlyPrice(event.target.value)} placeholder="$20 / month" /></label><label>Renewal · Manual<input value={renewalDate} onChange={(event) => setRenewalDate(event.target.value)} placeholder="Renews Sep 3" /></label></> : null}
+        <div className="consent-note"><ShieldCheck />{secretRequired ? "The credential is never written to app logs or SQLite." : providerId === "chatgpt-codex" ? "Uses the local Codex app-server read-only account endpoints." : "Reads the local Gemini CLI OAuth session only after this explicit test."}</div>
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="dialog-actions"><button type="button" className="button secondary" onClick={test}>{tested ? <Check /> : <ArrowClockwise className={testing ? "spin" : ""} />}{tested ? "Connection valid" : testing ? "Testing" : "Test connection"}</button><button className="button primary" disabled={!tested}>Save account</button></div>
+      </form>
+    </div>
+  );
+}
+
+function EditAccountDialog({ account, onClose, onSaved }: { account: ProviderAccount; onClose: () => void; onSaved: (account: ProviderAccount) => void }) {
+  const [displayName, setDisplayName] = useState(account.name);
+  const [credential, setCredential] = useState("");
+  const [credentialKind, setCredentialKind] = useState(account.credentialKind ?? "api_key");
+  const [planName, setPlanName] = useState(account.plan ?? "");
+  const [monthlyPrice, setMonthlyPrice] = useState(account.monthlyPrice ?? "");
+  const [renewalDate, setRenewalDate] = useState(account.renewalDate ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    const request: UpdateAccountRequest = {
+      accountId: account.id,
+      displayName,
+      credential: credential.trim() || undefined,
+      credentialKind,
+      planName: account.type === "Subscription" ? planName : undefined,
+      monthlyPrice: account.type === "Subscription" ? monthlyPrice : undefined,
+      renewalDate: account.type === "Subscription" ? renewalDate : undefined,
+    };
+    try {
+      const updated = isTauri
+        ? await updateConnectedAccount(request)
+        : { ...account, name: displayName, credentialKind, plan: planName, monthlyPrice, renewalDate };
+      onSaved(updated);
+    } catch (reason) {
+      setError(String(reason));
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="dialog-backdrop" onMouseDown={onClose}>
+      <form className="dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void save(); }}>
+        <button type="button" className="panel-close" onClick={onClose} aria-label="Close"><X /></button>
+        <p className="eyebrow">ACCOUNT SETTINGS</p><h2>Edit account</h2><p className="dialog-copy">{account.type === "Subscription" ? "Quota is automatic; plan name, price and renewal remain manual." : "Leave the credential blank to keep the existing secret in Windows Credential Manager."}</p>
+        <label>Account name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+        {account.provider === "openrouter" ? <label>Credential scope<select value={credentialKind} onChange={(event) => setCredentialKind(event.target.value)}><option value="api_key">API key · key-level usage</option><option value="management">Management · account credits</option></select></label> : null}
+        {account.type === "API Platform" ? <label>Replace credential<input value={credential} onChange={(event) => setCredential(event.target.value)} type="password" placeholder="Leave blank to keep current credential" autoComplete="off" /></label> : <><label>Plan name · Manual<input value={planName} onChange={(event) => setPlanName(event.target.value)} /></label><label>Monthly price · Manual<input value={monthlyPrice} onChange={(event) => setMonthlyPrice(event.target.value)} /></label><label>Renewal · Manual<input value={renewalDate} onChange={(event) => setRenewalDate(event.target.value)} /></label></>}
+        {account.provider === "openrouter" && credentialKind !== account.credentialKind && !credential ? <p className="field-help">Changing OpenRouter scope requires the corresponding new credential.</p> : null}
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
+        <div className="dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={saving || !displayName.trim()}>{saving ? <ArrowClockwise className="spin" /> : <Check />}{saving ? "Saving" : "Save changes"}</button></div>
       </form>
     </div>
   );
