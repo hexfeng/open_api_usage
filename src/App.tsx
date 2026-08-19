@@ -24,18 +24,26 @@ import { defaultSettings, demoProviders, demoSubscriptions } from "./demoData";
 import {
   isTauri,
   deleteAllLocalData,
+  cancelAuthentication,
+  detectAuthentication,
   listenForAccountUpdates,
   loadAppSettings,
   loadConnectedAccounts,
   openOfficialUrl,
+  pollAuthentication,
   refreshConnectedAccount,
   removeConnectedAccount,
   saveAppSettings,
   saveConnectedAccount,
+  saveOpenRouterOauthAccount,
   setConnectedAccountEnabled,
   testConnection,
+  startCodexLogin,
+  startOpenRouterLogin,
   updateConnectedAccount,
   type AccountRequest,
+  type AuthenticationAttempt,
+  type AuthenticationDetection,
   type UpdateAccountRequest,
 } from "./bridge";
 import type {
@@ -434,11 +442,10 @@ function SubscriptionCard({ account, onSelect }: { account: SubscriptionAccount;
       <div className="source-line"><SourceBadge source={account.source} /><span>{account.scope}</span></div>
       <div className="quota-stack">
         {account.metrics.filter((metric) => metric.kind === "quota").map((metric) => {
-          const value = Number.parseInt(metric.value, 10);
           return (
             <div className="quota" key={metric.id}>
               <div><span>{metric.label}</span><strong>{metric.value}</strong></div>
-              <div className="progress-track"><span style={{ width: `${value}%` }} /></div>
+              <div className="progress-track"><span style={{ width: `${metric.numericValue}%` }} /></div>
               <small>{metric.resetTime ? `Resets in ${metric.resetTime}` : metric.window}</small>
             </div>
           );
@@ -583,7 +590,7 @@ function DetailPanel({ account, onClose }: { account: ProviderAccount; onClose: 
         <StatusBadge status={account.status} />
         <div className="detail-metrics">{account.metrics.map((metric) => <MetricValue key={metric.id} metric={metric} />)}</div>
         <section className="trend-section"><div><h3>{account.historyLabel}</h3><span>{account.historyBasis}</span></div>{account.history.length ? <div className="mini-chart" aria-label="Seven day trend">{account.history.map((value, index) => <span key={index} style={{ height: `${Math.max(18, max ? (value / max) * 100 : 18)}%` }} />)}</div> : <p className="history-empty">History starts after the first stored refresh.</p>}</section>
-        <section className="diagnostic"><h3>Source diagnostic</h3><dl><div><dt>Strategy</dt><dd>{account.source}</dd></div><div><dt>Credential</dt><dd>{account.credentialHint}</dd></div><div><dt>Last observed</dt><dd>{account.updatedAt}</dd></div>{account.type === "Subscription" ? <div><dt>Plan metadata</dt><dd>{account.plan || "Not set"} · Manual</dd></div> : null}<div><dt>Failure behavior</dt><dd>Keep last success and mark Stale</dd></div></dl>{account.diagnostic ? <p>{account.diagnostic}</p> : null}</section>
+        <section className="diagnostic"><h3>Source diagnostic</h3><dl><div><dt>Strategy</dt><dd>{account.source}</dd></div><div><dt>Authentication</dt><dd>{account.authenticationMode} · owner: {account.credentialOwner}</dd></div>{account.identityLabel ? <div><dt>Identity</dt><dd>{account.identityLabel}</dd></div> : null}<div><dt>Credential</dt><dd>{account.credentialHint}</dd></div><div><dt>Last observed</dt><dd>{account.updatedAt}</dd></div>{account.type === "Subscription" ? <div><dt>Plan metadata</dt><dd>{account.plan || "Not set"} · Manual</dd></div> : null}<div><dt>Failure behavior</dt><dd>Keep last success and mark Stale</dd></div></dl>{account.diagnostic ? <p>{account.diagnostic}</p> : null}</section>
         {account.lastError ? <p className="form-error" role="alert">{account.lastError}</p> : null}
         <OfficialLink href={account.officialUrl} />
       </aside>
@@ -597,28 +604,50 @@ function AddAccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: 
   const [providerId, setProviderId] = useState<ProviderId>("openai");
   const [displayName, setDisplayName] = useState("Personal account");
   const [credential, setCredential] = useState("");
-  const [credentialKind, setCredentialKind] = useState("api_key");
+  const [openRouterMethod, setOpenRouterMethod] = useState<"oauth" | "api_key" | "management">("oauth");
   const [planName, setPlanName] = useState("");
   const [monthlyPrice, setMonthlyPrice] = useState("");
   const [renewalDate, setRenewalDate] = useState("");
+  const [detection, setDetection] = useState<AuthenticationDetection | null>(null);
+  const [attempt, setAttempt] = useState<AuthenticationAttempt | null>(null);
   const [error, setError] = useState("");
   const subscription = providerId === "chatgpt-codex" || providerId === "google-gemini-cli";
-  const secretRequired = !subscription;
-  const request: AccountRequest = {
-    providerId,
-    displayName,
-    credential,
-    credentialKind: providerId === "openrouter" ? credentialKind : providerId === "openai" ? "admin" : subscription ? "local_oauth" : "api_key",
-    planName: subscription ? planName : undefined,
-    monthlyPrice: subscription ? monthlyPrice : undefined,
-    renewalDate: subscription ? renewalDate : undefined,
-  };
+  const oauthOpenRouter = providerId === "openrouter" && openRouterMethod === "oauth";
+  const secretRequired = !subscription && !oauthOpenRouter;
+  const credentialKind = providerId === "openrouter" ? (openRouterMethod === "management" ? "management" : "api_key") : providerId === "openai" ? "admin" : subscription ? "local_oauth" : "api_key";
+  const request: AccountRequest = { providerId, displayName, credential, credentialKind, planName: subscription ? planName : undefined, monthlyPrice: subscription ? monthlyPrice : undefined, renewalDate: subscription ? renewalDate : undefined, identityLabel: detection?.identityLabel, authenticationMode: detection?.authenticationMode };
+  const reset = (next?: ProviderId) => { if (attempt) void cancelAuthentication(attempt.attemptId); if (next) setProviderId(next); setAttempt(null); setDetection(null); setTested(false); setError(""); setCredential(""); };
+  const close = () => { if (attempt) void cancelAuthentication(attempt.attemptId); onClose(); };
+  const mockDetection = (): AuthenticationDetection => ({ providerId, availability: "existingSession", authenticationMode: providerId === "chatgpt-codex" ? "sharedLocalSession" : "localCliOauth", credentialOwner: providerId === "chatgpt-codex" ? "codex" : "geminiCli", identityLabel: providerId === "chatgpt-codex" ? "user@example.com" : "user@gmail.com", planLabel: providerId === "chatgpt-codex" ? "plus" : "Gemini CLI", scope: providerId === "chatgpt-codex" ? "Codex only" : "Gemini CLI only · Experimental", diagnostic: "Preview account detection" });
   const test = async () => {
-    setTesting(true); setError(""); setTested(false);
+    setTesting(true); setError(""); setTested(false); setDetection(null);
     try {
-      if (isTauri) await testConnection(request);
-      else await new Promise((resolve) => window.setTimeout(resolve, 650));
-      setTested(true);
+      if (subscription) {
+        const found = isTauri ? await detectAuthentication(providerId) : mockDetection();
+        setDetection(found);
+        setTested(found.availability === "existingSession");
+      } else {
+        if (isTauri) await testConnection(request); else await new Promise((resolve) => window.setTimeout(resolve, 250));
+        setTested(true);
+      }
+    } catch (reason) { setError(String(reason)); }
+    finally { setTesting(false); }
+  };
+  const authorize = async (deviceCode = false) => {
+    setTesting(true); setError(""); setTested(false); setDetection(null);
+    try {
+      if (!isTauri) { await new Promise((resolve) => window.setTimeout(resolve, 250)); setDetection(mockDetection()); setTested(true); return; }
+      const started = providerId === "openrouter" ? await startOpenRouterLogin() : await startCodexLogin(deviceCode);
+      setAttempt(started);
+      if (started.authorizationUrl) await openOfficialUrl(started.authorizationUrl);
+      let current = started;
+      while (current.status === "authorizing") {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        current = await pollAuthentication(started.attemptId);
+        setAttempt(current);
+      }
+      if (current.status === "completed" && current.detection) { setDetection(current.detection); setTested(true); }
+      else if (current.status !== "cancelled") setError(current.error || `Authorization ${current.status}`);
     } catch (reason) { setError(String(reason)); }
     finally { setTesting(false); }
   };
@@ -626,25 +655,39 @@ function AddAccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: 
     setTesting(true); setError("");
     try {
       const demo = [...demoProviders, ...demoSubscriptions].find((item) => item.provider === providerId);
-      const account = isTauri ? await saveConnectedAccount(request) : { ...demo!, id: crypto.randomUUID(), name: displayName, plan: planName || demo?.plan, monthlyPrice: monthlyPrice || demo?.monthlyPrice, renewalDate: renewalDate || demo?.renewalDate };
+      const account = isTauri
+        ? oauthOpenRouter && attempt ? await saveOpenRouterOauthAccount(attempt.attemptId, displayName) : await saveConnectedAccount(request)
+        : { ...demo!, id: crypto.randomUUID(), name: displayName, plan: planName || demo?.plan, monthlyPrice: monthlyPrice || demo?.monthlyPrice, renewalDate: renewalDate || demo?.renewalDate };
       onSaved(account); onClose();
     } catch (reason) { setError(String(reason)); setTesting(false); }
   };
+  const unavailable = detection && detection.availability !== "existingSession";
   return (
-    <div className="dialog-backdrop" onMouseDown={onClose}>
+    <div className="dialog-backdrop" onMouseDown={close}>
       <form className="dialog" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void save(); }}>
-        <button type="button" className="panel-close" onClick={onClose} aria-label="Close"><X /></button>
-        <p className="eyebrow">READ-ONLY CONNECTION</p><h2>Add account</h2><p className="dialog-copy">API secrets use Windows Credential Manager. Local subscriptions reuse the provider CLI login without copying tokens into this app.</p>
-        <label>Provider<select value={providerId} onChange={(event) => { const next = event.target.value as ProviderId; setProviderId(next); setTested(false); setError(""); }}><option value="openai">OpenAI API</option><option value="deepseek">DeepSeek API</option><option value="openrouter">OpenRouter</option><option value="google-ai-studio">Google AI Studio API</option><option value="chatgpt-codex">ChatGPT / Codex subscription</option><option value="google-gemini-cli">Google / Gemini CLI subscription · Experimental</option></select></label>
-        {providerId === "openrouter" && <label>Credential scope<select value={credentialKind} onChange={(event) => { setCredentialKind(event.target.value); setTested(false); }}><option value="api_key">API key · key-level usage</option><option value="management">Management · account credits</option></select></label>}
+        <button type="button" className="panel-close" onClick={close} aria-label="Close"><X /></button>
+        <p className="eyebrow">READ-ONLY CONNECTION</p><h2>Add account</h2><p className="dialog-copy">Each provider keeps its own authentication boundary. Secrets stay in Windows Credential Manager; shared Codex and Gemini sessions remain owned by their installed clients.</p>
+        <label>Provider<select value={providerId} disabled={testing} onChange={(event) => reset(event.target.value as ProviderId)}><option value="openai">OpenAI API</option><option value="deepseek">DeepSeek API</option><option value="openrouter">OpenRouter</option><option value="google-ai-studio">Google AI Studio API</option><option value="chatgpt-codex">ChatGPT / Codex subscription</option><option value="google-gemini-cli">Google / Gemini CLI subscription · Experimental</option></select></label>
+        {providerId === "openrouter" && <label>Connection method<select value={openRouterMethod} disabled={testing} onChange={(event) => { setOpenRouterMethod(event.target.value as typeof openRouterMethod); setTested(false); setDetection(null); setCredential(""); }}><option value="oauth">Connect with OpenRouter · PKCE</option><option value="api_key">Paste normal API key · key-level</option><option value="management">Add Management Key · advanced account scope</option></select></label>}
         <label>Account name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Personal account" /></label>
-        {secretRequired ? <label>{providerId === "openai" ? "Admin credential" : "API key"}<input value={credential} onChange={(event) => { setCredential(event.target.value); setTested(false); }} type="password" placeholder="Paste credential" autoComplete="off" /></label> : null}
-        {providerId === "openai" && <p className="field-help">Organization usage requires an Admin Key; a normal API key is not treated as a balance credential.</p>}
-        {providerId === "google-ai-studio" && <p className="field-help">The key validates project API access. Google exposes usage, spend and prepaid balance in AI Studio, not through the public API-key endpoint.</p>}
-        {subscription ? <><label>Plan name · Manual<input value={planName} onChange={(event) => setPlanName(event.target.value)} placeholder={providerId === "chatgpt-codex" ? "ChatGPT Plus" : "Google AI Pro"} /></label><label>Monthly price · Manual<input value={monthlyPrice} onChange={(event) => setMonthlyPrice(event.target.value)} placeholder="$20 / month" /></label><label>Renewal · Manual<input value={renewalDate} onChange={(event) => setRenewalDate(event.target.value)} placeholder="Renews Sep 3" /></label></> : null}
-        <div className="consent-note"><ShieldCheck />{secretRequired ? "The credential is never written to app logs or SQLite." : providerId === "chatgpt-codex" ? "Uses the local Codex app-server read-only account endpoints." : "Reads the local Gemini CLI OAuth session only after this explicit test."}</div>
+        {secretRequired ? <label>{providerId === "openai" ? "Organization Admin Key" : providerId === "openrouter" && openRouterMethod === "management" ? "Management Key" : providerId === "google-ai-studio" ? "Gemini API Key" : "API Key"}<input value={credential} onChange={(event) => { setCredential(event.target.value); setTested(false); }} type="password" placeholder="Paste credential" autoComplete="off" /></label> : null}
+        {providerId === "openai" && <p className="field-help">Requires an Organization Admin Key with elevated organization access for Costs and Usage; it is not ChatGPT quota or prepaid balance. <button type="button" className="text-link" onClick={() => void openOfficialUrl("https://platform.openai.com/settings/organization/admin-keys")}>Get an Admin Key</button></p>}
+        {providerId === "deepseek" && <p className="field-help">Reads account balance authorized by this key. Total, topped-up and granted balances remain separate. <button type="button" className="text-link" onClick={() => void openOfficialUrl("https://platform.deepseek.com/api_keys")}>Open API keys</button></p>}
+        {providerId === "google-ai-studio" && <p className="field-help">Validates key/project API access only. Usage, spend and prepaid balance remain in AI Studio. <button type="button" className="text-link" onClick={() => void openOfficialUrl("https://aistudio.google.com/app/apikey")}>Get a Gemini API Key</button></p>}
+        {providerId === "openrouter" && <p className="field-help">{oauthOpenRouter ? "Preferred: system-browser authorization returns a user-controlled normal key through localhost PKCE S256. OpenRouter does not define OAuth state for this flow." : openRouterMethod === "management" ? "Advanced account-level credits scope. This remains separate from normal key-level usage." : "Manual compatibility path for a normal key with key-level usage."}</p>}
+        {subscription ? <><label>Plan name · Manual metadata<input value={planName} onChange={(event) => setPlanName(event.target.value)} placeholder={providerId === "chatgpt-codex" ? "ChatGPT Plus" : "Optional plan label"} /></label><label>Monthly price · Manual<input value={monthlyPrice} onChange={(event) => setMonthlyPrice(event.target.value)} placeholder="$20 / month" /></label><label>Renewal · Manual<input value={renewalDate} onChange={(event) => setRenewalDate(event.target.value)} placeholder="Renews Sep 3" /></label></> : null}
+        {detection ? <div className="consent-note"><ShieldCheck /><span><strong>{detection.identityLabel || (unavailable ? "No usable identity detected" : "Identity unavailable")}</strong><br />{detection.planLabel ? `${detection.planLabel} · ` : ""}{detection.scope}<br />{detection.diagnostic}</span></div> : <div className="consent-note"><ShieldCheck />{secretRequired ? "The new credential is tested before save or replacement and is never written to logs or SQLite." : providerId === "chatgpt-codex" ? "Detects the current Codex identity first and requires your confirmation. Scope is Codex quota only." : providerId === "google-gemini-cli" ? "Detects the official CLI session and requires confirmation. Scope is per-model Gemini CLI quota only · Experimental." : "Uses a random localhost callback, one-time code exchange and secure key storage."}</div>}
+        {attempt?.status === "authorizing" && attempt.userCode ? <p className="field-help">Device code: <strong>{attempt.userCode}</strong></p> : null}
+        {unavailable && providerId === "google-gemini-cli" ? <p className="field-help">Install the official Gemini CLI, run <code>gemini</code>, choose “Sign in with Google”, then use Check again. The dashboard does not automate the Google form.</p> : null}
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="dialog-actions"><button type="button" className="button secondary" onClick={test}>{tested ? <Check /> : <ArrowClockwise className={testing ? "spin" : ""} />}{tested ? "Connection valid" : testing ? "Testing" : "Test connection"}</button><button className="button primary" disabled={!tested}>Save account</button></div>
+        <div className="dialog-actions">
+          {attempt?.status === "authorizing" ? <button type="button" className="button secondary" onClick={() => { void cancelAuthentication(attempt.attemptId); setAttempt({ ...attempt, status: "cancelled" }); setTesting(false); }}>Cancel</button> : null}
+          {providerId === "chatgpt-codex" && unavailable ? <><button type="button" className="button secondary" onClick={() => void authorize(true)}>Use device code</button><button type="button" className="button secondary" onClick={() => void authorize(false)}>Sign in with Codex</button></> : null}
+          {providerId === "chatgpt-codex" && detection?.availability === "existingSession" ? <button type="button" className="button secondary" onClick={() => void authorize(false)}>Sign in with another account</button> : null}
+          {oauthOpenRouter && !tested ? <button type="button" className="button secondary" disabled={testing} onClick={() => void authorize(false)}>{testing ? <ArrowClockwise className="spin" /> : <ArrowSquareOut />}{testing ? "Authorizing" : "Connect with OpenRouter"}</button> : null}
+          {!oauthOpenRouter ? <button type="button" className="button secondary" disabled={testing} onClick={test}>{tested ? <Check /> : <ArrowClockwise className={testing ? "spin" : ""} />}{tested ? subscription ? "Identity confirmed" : "Connection valid" : testing ? "Checking" : detection ? "Check again" : subscription ? "Detect account" : "Test connection"}</button> : null}
+          <button className="button primary" disabled={!tested || testing || !displayName.trim()}>{subscription ? "Use this account" : "Save account"}</button>
+        </div>
       </form>
     </div>
   );

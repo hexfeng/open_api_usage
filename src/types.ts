@@ -62,6 +62,11 @@ export interface ProviderAccount {
   plan?: string;
   monthlyPrice?: string;
   renewalDate?: string;
+  authenticationMode: "pastedSecret" | "providerOauth" | "sharedLocalSession" | "localCliOauth";
+  credentialOwner: "dashboard" | "codex" | "geminiCli" | "provider";
+  identityLabel?: string;
+  consentedAt: string;
+  lastValidatedAt?: string;
 }
 
 export type SubscriptionAccount = ProviderAccount;

@@ -27,6 +27,24 @@ pub enum AccountType {
     Subscription,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthenticationMode {
+    PastedSecret,
+    ProviderOauth,
+    SharedLocalSession,
+    LocalCliOauth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CredentialOwner {
+    Dashboard,
+    Codex,
+    GeminiCli,
+    Provider,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDescriptor {
@@ -54,6 +72,58 @@ pub struct AccountConnection {
     pub plan_name: Option<String>,
     pub monthly_price: Option<String>,
     pub renewal_date: Option<String>,
+    pub auth_mode: AuthenticationMode,
+    pub credential_owner: CredentialOwner,
+    pub identity_label: Option<String>,
+    pub identity_fingerprint: Option<String>,
+    pub consented_at: String,
+    pub last_validated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthenticationAvailability {
+    ExistingSession,
+    AuthenticationRequired,
+    NotInstalled,
+    CredentialInvalid,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationDetection {
+    pub provider_id: String,
+    pub availability: AuthenticationAvailability,
+    pub authentication_mode: AuthenticationMode,
+    pub credential_owner: CredentialOwner,
+    pub identity_label: Option<String>,
+    pub plan_label: Option<String>,
+    pub scope: String,
+    pub diagnostic: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthenticationAttemptStatus {
+    Authorizing,
+    Completed,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthenticationAttempt {
+    pub attempt_id: String,
+    pub provider_id: String,
+    pub status: AuthenticationAttemptStatus,
+    pub authorization_url: Option<String>,
+    pub user_code: Option<String>,
+    pub expires_at: String,
+    pub detection: Option<AuthenticationDetection>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +221,8 @@ pub struct SaveAccountRequest {
     pub plan_name: Option<String>,
     pub monthly_price: Option<String>,
     pub renewal_date: Option<String>,
+    pub identity_label: Option<String>,
+    pub authentication_mode: Option<AuthenticationMode>,
 }
 
 #[derive(Debug, Deserialize)]

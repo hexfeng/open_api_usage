@@ -5,8 +5,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::{
     error::AppResult,
     models::{
-        AccountConnection, AccountSnapshot, AccountType, AppSettings, FetchResult, FetchStrategy,
-        HistoryPoint, HistorySeries, Metric,
+        AccountConnection, AccountSnapshot, AccountType, AppSettings, AuthenticationMode,
+        CredentialOwner, FetchResult, FetchStrategy, HistoryPoint, HistorySeries, Metric,
     },
 };
 
@@ -31,6 +31,12 @@ impl AppDatabase {
                plan_name TEXT,
                monthly_price TEXT,
                renewal_date TEXT,
+               auth_mode TEXT NOT NULL DEFAULT 'pasted_secret',
+               credential_owner TEXT NOT NULL DEFAULT 'dashboard',
+               identity_label TEXT,
+               identity_fingerprint TEXT,
+               consented_at TEXT NOT NULL DEFAULT '',
+               last_validated_at TEXT,
                created_at TEXT NOT NULL,
                updated_at TEXT NOT NULL
              );
@@ -96,6 +102,36 @@ impl AppDatabase {
         let _ = connection.execute("ALTER TABLE accounts ADD COLUMN monthly_price TEXT", []);
         let _ = connection.execute("ALTER TABLE accounts ADD COLUMN renewal_date TEXT", []);
         let _ = connection.execute(
+            "ALTER TABLE accounts ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'pasted_secret'",
+            [],
+        );
+        let _ = connection.execute(
+            "ALTER TABLE accounts ADD COLUMN credential_owner TEXT NOT NULL DEFAULT 'dashboard'",
+            [],
+        );
+        let _ = connection.execute("ALTER TABLE accounts ADD COLUMN identity_label TEXT", []);
+        let _ = connection.execute(
+            "ALTER TABLE accounts ADD COLUMN identity_fingerprint TEXT",
+            [],
+        );
+        let _ = connection.execute(
+            "ALTER TABLE accounts ADD COLUMN consented_at TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = connection.execute("ALTER TABLE accounts ADD COLUMN last_validated_at TEXT", []);
+        connection.execute(
+            "UPDATE accounts SET auth_mode='shared_local_session', credential_owner='codex' WHERE provider_id='chatgpt-codex' AND auth_mode='pasted_secret'",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE accounts SET auth_mode='local_cli_oauth', credential_owner='gemini_cli' WHERE provider_id='google-gemini-cli' AND auth_mode='pasted_secret'",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE accounts SET consented_at=updated_at WHERE consented_at=''",
+            [],
+        )?;
+        let _ = connection.execute(
             "ALTER TABLE provider_history_buckets ADD COLUMN currency TEXT",
             [],
         );
@@ -118,13 +154,15 @@ impl AppDatabase {
         let now = chrono::Utc::now().to_rfc3339();
         let connection = self.0.lock().expect("database mutex poisoned");
         connection.execute(
-            "INSERT INTO accounts (id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+            "INSERT INTO accounts (id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date, auth_mode, credential_owner, identity_label, identity_fingerprint, consented_at, last_validated_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?19)
              ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, credential_ref=excluded.credential_ref,
                credential_kind=excluded.credential_kind, enabled=excluded.enabled, source=excluded.source, scope=excluded.scope,
                account_type=excluded.account_type, plan_name=excluded.plan_name, monthly_price=excluded.monthly_price,
-               renewal_date=excluded.renewal_date, updated_at=excluded.updated_at",
-            params![account.id, account.provider_id, account.display_name, account.credential_ref, account.credential_kind, account.enabled, strategy_name(&account.source), account.scope, account_type_name(&account.account_type), account.plan_name, account.monthly_price, account.renewal_date, now],
+               renewal_date=excluded.renewal_date, auth_mode=excluded.auth_mode, credential_owner=excluded.credential_owner,
+               identity_label=excluded.identity_label, identity_fingerprint=excluded.identity_fingerprint,
+               consented_at=excluded.consented_at, last_validated_at=excluded.last_validated_at, updated_at=excluded.updated_at",
+            params![account.id, account.provider_id, account.display_name, account.credential_ref, account.credential_kind, account.enabled, strategy_name(&account.source), account.scope, account_type_name(&account.account_type), account.plan_name, account.monthly_price, account.renewal_date, auth_mode_name(&account.auth_mode), credential_owner_name(&account.credential_owner), account.identity_label, account.identity_fingerprint, account.consented_at, account.last_validated_at, now],
         )?;
         Ok(())
     }
@@ -132,7 +170,7 @@ impl AppDatabase {
     pub fn list_accounts(&self) -> AppResult<Vec<AccountConnection>> {
         let connection = self.0.lock().expect("database mutex poisoned");
         let mut statement = connection.prepare(
-            "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date FROM accounts ORDER BY created_at",
+            "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date, auth_mode, credential_owner, identity_label, identity_fingerprint, consented_at, last_validated_at FROM accounts ORDER BY created_at",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(AccountConnection {
@@ -148,6 +186,12 @@ impl AppDatabase {
                 plan_name: row.get(9)?,
                 monthly_price: row.get(10)?,
                 renewal_date: row.get(11)?,
+                auth_mode: parse_auth_mode(&row.get::<_, String>(12)?),
+                credential_owner: parse_credential_owner(&row.get::<_, String>(13)?),
+                identity_label: row.get(14)?,
+                identity_fingerprint: row.get(15)?,
+                consented_at: row.get(16)?,
+                last_validated_at: row.get(17)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -157,7 +201,7 @@ impl AppDatabase {
         let connection = self.0.lock().expect("database mutex poisoned");
         Ok(connection
             .query_row(
-                "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date FROM accounts WHERE id=?1",
+                "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date, auth_mode, credential_owner, identity_label, identity_fingerprint, consented_at, last_validated_at FROM accounts WHERE id=?1",
                 [account_id],
                 account_from_row,
             )
@@ -175,7 +219,7 @@ impl AppDatabase {
             params![account_id, enabled, chrono::Utc::now().to_rfc3339()],
         )?;
         Ok(connection.query_row(
-            "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date FROM accounts WHERE id=?1",
+            "SELECT id, provider_id, display_name, credential_ref, credential_kind, enabled, source, scope, account_type, plan_name, monthly_price, renewal_date, auth_mode, credential_owner, identity_label, identity_fingerprint, consented_at, last_validated_at FROM accounts WHERE id=?1",
             [account_id],
             account_from_row,
         )?)
@@ -213,6 +257,10 @@ impl AppDatabase {
              ON CONFLICT(account_id) DO UPDATE SET last_status=excluded.last_status, last_observed_at=excluded.last_observed_at,
                diagnostic=excluded.diagnostic, last_error=NULL, last_error_at=NULL",
             params![account_id, result.status, result.observed_at, result.diagnostic],
+        )?;
+        transaction.execute(
+            "UPDATE accounts SET last_validated_at=?2, updated_at=?2 WHERE id=?1",
+            params![account_id, result.observed_at],
         )?;
         transaction.commit()?;
         drop(connection);
@@ -395,6 +443,12 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountConnecti
         plan_name: row.get(9)?,
         monthly_price: row.get(10)?,
         renewal_date: row.get(11)?,
+        auth_mode: parse_auth_mode(&row.get::<_, String>(12)?),
+        credential_owner: parse_credential_owner(&row.get::<_, String>(13)?),
+        identity_label: row.get(14)?,
+        identity_fingerprint: row.get(15)?,
+        consented_at: row.get(16)?,
+        last_validated_at: row.get(17)?,
     })
 }
 
@@ -532,6 +586,42 @@ fn parse_account_type(value: &str) -> AccountType {
     }
 }
 
+fn auth_mode_name(mode: &AuthenticationMode) -> &'static str {
+    match mode {
+        AuthenticationMode::PastedSecret => "pasted_secret",
+        AuthenticationMode::ProviderOauth => "provider_oauth",
+        AuthenticationMode::SharedLocalSession => "shared_local_session",
+        AuthenticationMode::LocalCliOauth => "local_cli_oauth",
+    }
+}
+
+fn parse_auth_mode(value: &str) -> AuthenticationMode {
+    match value {
+        "provider_oauth" => AuthenticationMode::ProviderOauth,
+        "shared_local_session" => AuthenticationMode::SharedLocalSession,
+        "local_cli_oauth" => AuthenticationMode::LocalCliOauth,
+        _ => AuthenticationMode::PastedSecret,
+    }
+}
+
+fn credential_owner_name(owner: &CredentialOwner) -> &'static str {
+    match owner {
+        CredentialOwner::Dashboard => "dashboard",
+        CredentialOwner::Codex => "codex",
+        CredentialOwner::GeminiCli => "gemini_cli",
+        CredentialOwner::Provider => "provider",
+    }
+}
+
+fn parse_credential_owner(value: &str) -> CredentialOwner {
+    match value {
+        "codex" => CredentialOwner::Codex,
+        "gemini_cli" => CredentialOwner::GeminiCli,
+        "provider" => CredentialOwner::Provider,
+        _ => CredentialOwner::Dashboard,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +664,12 @@ mod tests {
             plan_name: None,
             monthly_price: None,
             renewal_date: None,
+            auth_mode: AuthenticationMode::PastedSecret,
+            credential_owner: CredentialOwner::Dashboard,
+            identity_label: None,
+            identity_fingerprint: None,
+            consented_at: "2026-08-19T00:00:00Z".into(),
+            last_validated_at: None,
         };
         database.save_account(&account).unwrap();
         let raw: String = database
@@ -601,6 +697,12 @@ mod tests {
             plan_name: None,
             monthly_price: None,
             renewal_date: None,
+            auth_mode: AuthenticationMode::PastedSecret,
+            credential_owner: CredentialOwner::Dashboard,
+            identity_label: None,
+            identity_fingerprint: None,
+            consented_at: "2026-08-19T00:00:00Z".into(),
+            last_validated_at: None,
         };
         database.save_account(&account).unwrap();
         database
@@ -634,6 +736,12 @@ mod tests {
             plan_name: None,
             monthly_price: None,
             renewal_date: None,
+            auth_mode: AuthenticationMode::PastedSecret,
+            credential_owner: CredentialOwner::Dashboard,
+            identity_label: None,
+            identity_fingerprint: None,
+            consented_at: "2026-08-19T00:00:00Z".into(),
+            last_validated_at: None,
         };
         database.save_account(&account).unwrap();
         assert!(
@@ -672,6 +780,12 @@ mod tests {
             plan_name: None,
             monthly_price: None,
             renewal_date: None,
+            auth_mode: AuthenticationMode::PastedSecret,
+            credential_owner: CredentialOwner::Dashboard,
+            identity_label: None,
+            identity_fingerprint: None,
+            consented_at: "2026-08-19T00:00:00Z".into(),
+            last_validated_at: None,
         };
         database.save_account(&account).unwrap();
         let observed_at = chrono::Utc::now().to_rfc3339();
@@ -734,11 +848,77 @@ mod tests {
             plan_name: Some("ChatGPT Plus".into()),
             monthly_price: Some("$20 / month".into()),
             renewal_date: Some("Renews Sep 3".into()),
+            auth_mode: AuthenticationMode::SharedLocalSession,
+            credential_owner: CredentialOwner::Codex,
+            identity_label: Some("user@example.com".into()),
+            identity_fingerprint: None,
+            consented_at: "2026-08-19T00:00:00Z".into(),
+            last_validated_at: None,
         };
         database.save_account(&account).unwrap();
         let restored = database.get_account(&account.id).unwrap().unwrap();
         assert_eq!(restored.account_type, AccountType::Subscription);
         assert_eq!(restored.plan_name.as_deref(), Some("ChatGPT Plus"));
         assert!(restored.credential_ref.is_none());
+    }
+
+    #[test]
+    fn migrates_existing_accounts_to_explicit_authentication_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "aud-auth-migration-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE accounts (
+                id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, display_name TEXT NOT NULL,
+                credential_ref TEXT, credential_kind TEXT, enabled INTEGER NOT NULL,
+                source TEXT NOT NULL, scope TEXT NOT NULL, account_type TEXT NOT NULL,
+                plan_name TEXT, monthly_price TEXT, renewal_date TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
+             INSERT INTO accounts VALUES (
+                'codex', 'chatgpt-codex', 'Codex', NULL, 'local_oauth', 1,
+                'cli_oauth', 'Codex only', 'subscription', NULL, NULL, NULL,
+                '2026-08-18T00:00:00Z', '2026-08-19T00:00:00Z'
+             );",
+            )
+            .unwrap();
+        drop(connection);
+        let database = AppDatabase::open(&path).unwrap();
+        let account = database.get_account("codex").unwrap().unwrap();
+        assert_eq!(account.auth_mode, AuthenticationMode::SharedLocalSession);
+        assert_eq!(account.credential_owner, CredentialOwner::Codex);
+        assert_eq!(account.consented_at, "2026-08-19T00:00:00Z");
+        drop(database);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn sqlite_schema_has_no_raw_secret_or_oauth_material_columns() {
+        let database = AppDatabase::open(Path::new(":memory:")).unwrap();
+        let connection = database.0.lock().unwrap();
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('accounts')")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for forbidden in [
+            "credential",
+            "api_key",
+            "token",
+            "authorization_code",
+            "code_verifier",
+            "cookie",
+        ] {
+            assert!(!columns.iter().any(|column| column == forbidden));
+        }
+        assert!(columns.contains(&"credential_ref".to_owned()));
     }
 }

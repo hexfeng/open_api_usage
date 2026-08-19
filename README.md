@@ -18,6 +18,8 @@ Local-first Windows desktop dashboard for monitoring personal AI API accounts an
 - Google AI Studio API and Gemini CLI subscription accounts are stored and displayed separately.
 - Codex and Gemini subscription scopes are explicit and never described as full ChatGPT or Google AI entitlement usage.
 - Provider authentication is intentionally split between pasted secrets, provider-managed browser authorization and confirmed local CLI sessions; there is no universal login flow.
+- Codex connections detect and confirm the shared identity or use official App Server browser/device-code login; OpenRouter prefers localhost PKCE S256 while retaining manual key paths.
+- Authentication metadata is SQLite-backed, but raw keys/tokens/codes/verifiers are not; removing Codex or Gemini monitors never signs out their shared clients.
 
 ## Run
 

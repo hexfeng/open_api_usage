@@ -13,18 +13,18 @@
 9. ChatGPT/Codex app-server subscription quota implemented and live-validated on Windows.
 10. Google split into Google AI Studio API and Gemini CLI subscription accounts, with separate credentials, scope and diagnostics.
 
-## Next milestone: product-grade authentication
+## Completed milestone: product-grade authentication
 
-1. Add an authentication-mode and credential-owner model without changing metric semantics.
-2. Codex: detect the current account, display email/plan/scope and require explicit `Use this account` confirmation.
-3. Codex: implement App Server `account/login/start` browser flow, completion notifications, cancellation and timeout.
-4. Codex: add device-code fallback and keep `Remove from dashboard` separate from `account/logout`.
-5. OpenRouter: implement localhost PKCE S256 for normal user-controlled keys; keep Management key as an advanced manual option.
-6. API-key providers: add provider-specific setup guidance, permission descriptions and atomic test-before-replace behavior.
-7. Gemini CLI: add install/login-state diagnostics and explicit confirmation while retaining the Experimental label.
-8. Add authentication lifecycle tests for existing session, new login, cancellation, timeout, revoked credentials, account switch and local client removal.
+1. Authentication mode, credential owner, identity label/fingerprint, consent time and validation time are persisted without changing metric/history semantics.
+2. Codex detects and displays the current email/plan/Codex-only scope and requires explicit `Use this account` confirmation.
+3. Codex App Server `account/login/start` supports system-browser completion notifications, cancellation, timeout and account switching.
+4. Codex device-code fallback is available; dashboard removal never invokes `account/logout`.
+5. OpenRouter prefers localhost PKCE S256 with random port/path and single-use callback; manual normal keys and advanced Management keys remain separate.
+6. API-key providers have provider-specific setup/scope guidance, test-before-save and rollback-safe credential replacement.
+7. Gemini CLI distinguishes missing install, signed out, invalid credential and signed-in states, requires identity confirmation and remains Experimental.
+8. Authentication lifecycle/security tests cover identity confirmation UI, completion correlation, failed completion, cancellation/late-completion races, timeout state, PKCE callback path/single use, schema migration, cached authentication failures and error classification.
 
-The detailed contract is in [Authentication and Connection Design](AUTHENTICATION.md). These items are documented targets and are not implemented by this documentation update.
+The detailed implementation contract is in [Authentication and Connection Design](AUTHENTICATION.md).
 
 ## External acceptance still required
 
@@ -34,9 +34,9 @@ The detailed contract is in [Authentication and Connection Design](AUTHENTICATIO
 - Install and sign in to Gemini CLI, then reconcile its live per-model quota against `/stats model`.
 - Reconcile Google AI Studio API usage manually because the public API-key endpoint does not expose AI Studio spend or prepaid balance.
 - Complete a restart-while-offline manual check using the connected accounts to confirm cached values remain visible as Stale.
-- Validate Codex browser and device-code login against personal and managed-workspace accounts once implemented.
+- Validate Codex browser and device-code login against real personal and managed-workspace accounts.
 - Validate that removing a Codex or Gemini dashboard connection does not sign out the provider's installed client.
-- Validate OpenRouter PKCE callback, cancellation, replay rejection and secure local key storage once implemented.
+- Validate OpenRouter PKCE callback, cancellation and secure Windows Credential Manager storage against a real OpenRouter account; replay rejection is automated.
 
 ## Release checklist
 

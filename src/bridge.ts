@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { FetchStrategy as NativeStrategy } from "./nativeTypes";
+import type { AuthenticationMode, CredentialOwner, FetchStrategy as NativeStrategy } from "./nativeTypes";
 import type { AppSettings, MetricSource, ProviderAccount, ProviderId, Status } from "./types";
 
 export interface NativeMetric {
@@ -33,7 +33,7 @@ interface NativeHistorySeries {
   points: { observedAt: string; value: number }[];
 }
 
-interface NativeAccountSnapshot {
+export interface NativeAccountSnapshot {
   account: NativeAccount;
   result?: NativeFetchResult;
   history: NativeHistorySeries;
@@ -53,6 +53,12 @@ export interface NativeAccount {
   planName?: string;
   monthlyPrice?: string;
   renewalDate?: string;
+  authMode: AuthenticationMode;
+  credentialOwner: CredentialOwner;
+  identityLabel?: string;
+  identityFingerprint?: string;
+  consentedAt: string;
+  lastValidatedAt?: string;
 }
 
 export interface AccountRequest {
@@ -63,6 +69,30 @@ export interface AccountRequest {
   planName?: string;
   monthlyPrice?: string;
   renewalDate?: string;
+  identityLabel?: string;
+  authenticationMode?: AuthenticationMode;
+}
+
+export interface AuthenticationDetection {
+  providerId: ProviderId;
+  availability: "existingSession" | "authenticationRequired" | "notInstalled" | "credentialInvalid" | "unavailable";
+  authenticationMode: AuthenticationMode;
+  credentialOwner: CredentialOwner;
+  identityLabel?: string;
+  planLabel?: string;
+  scope: string;
+  diagnostic: string;
+}
+
+export interface AuthenticationAttempt {
+  attemptId: string;
+  providerId: ProviderId;
+  status: "authorizing" | "completed" | "cancelled" | "timedOut" | "failed";
+  authorizationUrl?: string;
+  userCode?: string;
+  expiresAt: string;
+  detection?: AuthenticationDetection;
+  error?: string;
 }
 
 export interface UpdateAccountRequest {
@@ -106,14 +136,22 @@ const metricLabel: Record<string, string> = {
   codex_credits: "Credits",
 };
 
-function formatMetric(metric: NativeMetric) {
+function remainingPercentage(usedPercentage: number) {
+  return Math.max(0, Math.min(100, 100 - usedPercentage));
+}
+
+function displayMetricValue(metric: NativeMetric) {
+  return metric.unit === "percent_used" ? remainingPercentage(metric.value) : metric.value;
+}
+
+function formatMetric(metric: NativeMetric, value: number) {
   if (metric.currency) {
     const symbol = metric.currency === "CNY" ? "¥" : "$";
-    return `${symbol}${metric.value.toFixed(2)}`;
+    return `${symbol}${value.toFixed(2)}`;
   }
-  if (metric.kind === "tokens") return metric.value >= 1_000_000 ? `${(metric.value / 1_000_000).toFixed(1)}M` : metric.value.toLocaleString();
-  if (metric.unit === "percent_used") return `${metric.value.toFixed(0)}%`;
-  return metric.value.toLocaleString();
+  if (metric.kind === "tokens") return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value.toLocaleString();
+  if (metric.unit === "percent_used") return `${value.toFixed(0)}%`;
+  return value.toLocaleString();
 }
 
 function relativeTime(value: string) {
@@ -131,16 +169,16 @@ export function toProviderAccount(snapshot: NativeAccountSnapshot): ProviderAcco
   const source = sourceLabel(account.source);
   const observedAt = result?.observedAt ?? new Date().toISOString();
   const hasCachedMetrics = Boolean(result?.metrics.length);
-  const authenticationFailure = /HTTP (401|403)|not signed in|OAuth credentials|refresh token|authentication/i.test(lastError ?? "");
-  const failedStatus: Status = authenticationFailure
-    ? "Authentication required"
-    : "Unavailable";
+  const historyIsUsedPercentage = account.providerId === "chatgpt-codex" && history.unit === "percent";
+  const authenticationFailure = /HTTP (401|403)|not signed in|OAuth credentials|refresh token|authentication required|insufficient permission/i.test(lastError ?? "");
+  const unavailableFailure = /not installed|could not be started|installation could not be located|executable/i.test(lastError ?? "");
+  const failedStatus: Status = authenticationFailure ? "Authentication required" : "Unavailable";
   return {
     id: account.id,
     provider: account.providerId,
     name: account.displayName,
     type: account.accountType === "subscription" ? "Subscription" : "API Platform",
-    status: !account.enabled ? "Unavailable" : lastError && hasCachedMetrics ? "Stale" : lastError ? failedStatus : result?.status ?? "Refreshing",
+    status: !account.enabled ? "Unavailable" : lastError && authenticationFailure ? "Authentication required" : lastError && unavailableFailure ? "Unavailable" : lastError && hasCachedMetrics ? "Stale" : lastError ? failedStatus : result?.status ?? "Refreshing",
     source,
     scope: account.scope,
     updatedLabel: lastError && hasCachedMetrics ? `${relativeTime(observedAt)} · last success` : result ? relativeTime(observedAt) : "No successful refresh",
@@ -155,33 +193,41 @@ export function toProviderAccount(snapshot: NativeAccountSnapshot): ProviderAcco
           : "Credential required",
     credentialKind: account.credentialKind,
     enabled: account.enabled,
-    history: history.points.map((point) => point.value),
-    historyLabel: history.label,
+    history: history.points.map((point) => historyIsUsedPercentage ? remainingPercentage(point.value) : point.value),
+    historyLabel: historyIsUsedPercentage ? "Codex quota remaining" : history.label,
     historyBasis: history.basis,
     lastError,
     diagnostic: result?.diagnostic,
     plan: account.planName,
     monthlyPrice: account.monthlyPrice,
     renewalDate: account.renewalDate,
-    metrics: (result?.metrics ?? []).map((metric, index) => ({
-      id: `${account.id}-${metric.kind}-${index}`,
-      label: metric.kind.startsWith("codex_quota")
-        ? metric.window ?? "Codex quota"
-        : metric.kind.startsWith("gemini_quota")
-          ? metric.scope.split(" · ").at(-1) ?? "Gemini quota"
-          : metricLabel[metric.kind] ?? metric.kind,
-      value: formatMetric(metric),
-      numericValue: metric.value,
-      metricKind: metric.kind,
-      kind: metric.unit === "percent_used" ? "quota" : metric.kind.includes("token") ? "tokens" : metric.kind.includes("request") ? "requests" : metric.unit === "models" ? "count" : "money",
-      unit: metric.unit,
-      currency: metric.currency === "CNY" ? "CNY" : metric.currency ? "USD" : undefined,
-      scope: metric.scope,
-      window: metric.window,
-      resetTime: metric.resetTime,
-      observedAt: metric.observedAt,
-      source,
-    })),
+    authenticationMode: account.authMode,
+    credentialOwner: account.credentialOwner,
+    identityLabel: account.identityLabel,
+    consentedAt: account.consentedAt,
+    lastValidatedAt: account.lastValidatedAt,
+    metrics: (result?.metrics ?? []).map((metric, index) => {
+      const value = displayMetricValue(metric);
+      return {
+        id: `${account.id}-${metric.kind}-${index}`,
+        label: metric.kind.startsWith("codex_quota")
+          ? `${metric.window ?? "Codex quota"} remaining`
+          : metric.kind.startsWith("gemini_quota")
+            ? `${metric.scope.split(" · ").at(-1) ?? "Gemini quota"} remaining`
+            : metricLabel[metric.kind] ?? metric.kind,
+        value: formatMetric(metric, value),
+        numericValue: value,
+        metricKind: metric.kind,
+        kind: metric.unit === "percent_used" ? "quota" : metric.kind.includes("token") ? "tokens" : metric.kind.includes("request") ? "requests" : metric.unit === "models" ? "count" : "money",
+        unit: metric.unit === "percent_used" ? "percent_remaining" : metric.unit,
+        currency: metric.currency === "CNY" ? "CNY" : metric.currency ? "USD" : undefined,
+        scope: metric.scope,
+        window: metric.window,
+        resetTime: metric.resetTime,
+        observedAt: metric.observedAt,
+        source,
+      };
+    }),
   };
 }
 
@@ -202,6 +248,31 @@ export async function refreshConnectedAccount(account: ProviderAccount): Promise
 
 export async function testConnection(request: AccountRequest): Promise<NativeFetchResult> {
   return invoke("test_provider", { providerId: request.providerId, credential: request.credential, credentialKind: request.credentialKind });
+}
+
+export async function detectAuthentication(providerId: ProviderId): Promise<AuthenticationDetection> {
+  return invoke("detect_authentication", { providerId });
+}
+
+export async function startCodexLogin(useDeviceCode = false): Promise<AuthenticationAttempt> {
+  return invoke("start_codex_login", { useDeviceCode });
+}
+
+export async function startOpenRouterLogin(): Promise<AuthenticationAttempt> {
+  return invoke("start_openrouter_login");
+}
+
+export async function pollAuthentication(attemptId: string): Promise<AuthenticationAttempt> {
+  return invoke("poll_authentication", { attemptId });
+}
+
+export async function cancelAuthentication(attemptId: string): Promise<void> {
+  if (isTauri) await invoke("cancel_authentication", { attemptId });
+}
+
+export async function saveOpenRouterOauthAccount(attemptId: string, displayName: string): Promise<ProviderAccount> {
+  const snapshot = await invoke<NativeAccountSnapshot>("save_openrouter_oauth_account", { attemptId, displayName });
+  return toProviderAccount(snapshot);
 }
 
 export async function saveConnectedAccount(request: AccountRequest): Promise<ProviderAccount> {
@@ -241,4 +312,5 @@ export async function listenForAccountUpdates(onUpdate: (account: ProviderAccoun
 
 export async function openOfficialUrl(url: string) {
   if (isTauri) await openUrl(url);
+  else window.open(url, "_blank", "noopener,noreferrer");
 }

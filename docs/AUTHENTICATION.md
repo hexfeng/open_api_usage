@@ -1,6 +1,6 @@
 # Authentication and Connection Design
 
-Status: product design target, updated 2026-08-19.
+Status: implemented engineering contract, updated 2026-08-19. Real-account acceptance items are listed in `DEVELOPMENT.md` and remain distinct from automated verification.
 
 This document separates the connection behavior already implemented in the desktop MVP from the authentication behavior required before a wider product release. The dashboard does not have one universal sign-in model: API platforms, provider-managed OAuth flows, and local subscription sessions have different credential owners and security boundaries.
 
@@ -26,7 +26,7 @@ This document separates the connection behavior already implemented in the deskt
 | Mode | Credential owner | User ceremony | Local storage | Providers |
 |---|---|---|---|---|
 | Pasted secret | User and provider | Paste a dedicated API/Admin/Management key, then test | Secret in Windows Credential Manager; opaque reference in SQLite | OpenAI API, DeepSeek, Google AI Studio, OpenRouter manual fallback |
-| Provider browser authorization | Provider or provider runtime | Open the system browser, authorize, return through a loopback callback | Provider-managed session or returned key in Windows Credential Manager | ChatGPT/Codex target flow, OpenRouter PKCE target flow |
+| Provider browser authorization | Provider or provider runtime | Open the system browser, authorize, return through a loopback callback | Provider-managed session or returned key in Windows Credential Manager | ChatGPT/Codex, OpenRouter PKCE |
 | Confirmed shared local session | Installed provider client | Detect account, display identity and scope, require explicit confirmation | No copied credential | ChatGPT/Codex current session reuse |
 | Local CLI OAuth reuse | Installed provider CLI | Install and sign in to the provider CLI, then explicitly connect | Provider CLI owns the source credential; dashboard stores no raw token | Gemini CLI · Experimental |
 | Manual metadata | User | Enter plan name, price and renewal date | Non-sensitive values in SQLite | ChatGPT/Codex and Gemini subscription metadata |
@@ -49,7 +49,7 @@ Refreshing  -> Stale (last success retained)
 Connected   -> Authentication required (credential expired, revoked or signed out)
 ```
 
-Product UI states such as `Detecting`, `Consent required`, `Authorizing` and `Cancelled` are design requirements, not current card statuses. The existing persisted account statuses remain `Live`, `Refreshing`, `Stale`, `Authentication required`, `Unavailable` and `Experimental` until the interaction work is implemented.
+Connection-dialog states such as `Detecting`, `Consent required`, `Authorizing` and `Cancelled` are implemented interaction states. Persisted account statuses remain `Live`, `Refreshing`, `Stale`, `Authentication required`, `Unavailable` and `Experimental`.
 
 Every successful connection must record or derive:
 
@@ -67,7 +67,7 @@ last successful validation time
 
 ## 5. Provider authentication matrix
 
-| Provider | Current MVP | Product target | Credential/data scope |
+| Provider | Previous MVP | Implemented product behavior | Credential/data scope |
 |---|---|---|---|
 | OpenAI API Platform | User pastes an Organization Admin Key | Keep explicit Admin Key setup; link to the official Admin Keys page and explain elevated permissions | Organization Costs and Usage; not prepaid balance and not ChatGPT subscription |
 | DeepSeek API Platform | User pastes an API key | Keep explicit API-key setup with test-before-save | Account balance returned to that key: availability, total, topped-up and granted balances |
@@ -88,7 +88,7 @@ Current implementation:
 4. Only after validation succeeds is the key stored in Windows Credential Manager.
 5. SQLite stores the generated `credential_ref`, account configuration and returned metrics.
 
-Product behavior:
+Implemented product behavior:
 
 - Label the action `Add Admin Key`, not `Sign in with OpenAI`.
 - State that only Organization Owners can create Admin Keys and that the key has elevated organization permissions.
@@ -109,7 +109,7 @@ Current implementation:
 3. A successful response validates the key and returns account availability plus balance components.
 4. The key is stored in Windows Credential Manager after successful validation.
 
-Product behavior:
+Implemented product behavior:
 
 - Label the action `Add API Key`; DeepSeek does not currently provide a product OAuth flow used by this connector.
 - Explain that the returned balance is account-level data authorized by the key.
@@ -122,12 +122,13 @@ Official reference: [DeepSeek account balance](https://api-docs.deepseek.com/api
 
 ### 6.3 OpenRouter
 
-Current implementation supports two manually selected credential scopes:
+Current implementation supports three deliberately separate paths:
 
+- Preferred provider browser authorization -> localhost PKCE S256 -> user-controlled normal API key.
 - Normal API key -> `GET /api/v1/key` -> key usage, limit and remaining limit.
 - Management key -> `GET /api/v1/credits` -> account total credits and total usage; remaining credits are calculated explicitly as `total_credits - total_usage`.
 
-Product target:
+Implemented product behavior:
 
 1. Make `Connect with OpenRouter` the preferred normal-key path.
 2. Generate a high-entropy PKCE verifier and S256 challenge.
@@ -150,7 +151,7 @@ Current implementation:
 3. Success validates API access and counts accessible `generateContent` models.
 4. The key is stored in Windows Credential Manager.
 
-Product behavior:
+Implemented product behavior:
 
 - Label the action `Add Gemini API Key`, not `Sign in with Google`.
 - Display the project/key scope and state that API keys inherit project and billing-account settings.
@@ -162,18 +163,16 @@ Official references: [Gemini API key setup](https://ai.google.dev/gemini-api/doc
 
 ### 6.5 ChatGPT / Codex
 
-Current implementation:
+Implemented product behavior:
 
 1. Locate the installed Codex executable, preferring `CODEX_CLI_PATH`, then the ChatGPT/Codex Desktop bundle, then `PATH`.
-2. Launch a new local `codex -s read-only -a untrusted app-server` child process.
-3. Call `account/read` with `refreshToken: false` and `account/rateLimits/read` over stdin/stdout.
-4. Reuse the authentication session already owned by Codex.
-5. Parse only ChatGPT account type, plan type, quota windows, reset times and optional Codex credits.
-6. Store no Codex credential reference in SQLite or Windows Credential Manager.
+2. Launch a new local `codex -s read-only -a untrusted app-server` child process and call `account/read` with `refreshToken: false`.
+3. Display the returned email, plan and Codex-only scope. A detected account is not saved until the user selects `Use this account`.
+4. For a missing or switched account, call official `account/login/start` in browser mode, correlate the `account/login/completed` notification by `loginId`, then re-read identity. Device-code mode is available as a fallback.
+5. Cancel by calling `account/login/cancel`; timeout terminates the pending App Server. Neither dashboard removal nor authentication cancellation calls `account/logout`.
+6. After consent, read only Codex quota windows, reset times and optional Codex credits. Store no Codex credential reference in SQLite or Windows Credential Manager.
 
-The current flow succeeds without a browser when Codex is already signed in. That behavior is technically valid but is not sufficient consent for a general product.
-
-Product target:
+Implemented flow:
 
 ```text
 Connect Codex
@@ -203,7 +202,7 @@ Official references: [Codex App Server authentication](https://learn.chatgpt.com
 
 ### 6.6 Google / Gemini CLI
 
-Current implementation:
+Implemented data access:
 
 1. Require the official Gemini CLI to be installed and signed in.
 2. Read its standard `gemini-cli-oauth` / `main-account` Windows credential, with legacy `~/.gemini/oauth_creds.json` fallback.
@@ -211,7 +210,7 @@ Current implementation:
 4. Call `loadCodeAssist` and `retrieveUserQuota` and parse per-model remaining fraction and reset time.
 5. Store no raw Google OAuth credential in SQLite or application logs.
 
-Product target and boundary:
+Implemented connection boundary:
 
 - Detect `Gemini CLI not installed`, `Installed but signed out`, `Signed in` and `Credential invalid` separately.
 - For an existing session, show the detected Google identity when the CLI exposes it and require explicit confirmation before monitoring.
@@ -241,9 +240,9 @@ Provider-owned local store
     Codex or Gemini CLI OAuth session
 ```
 
-### Required product metadata
+### Persisted product metadata
 
-The connection model should later make the following explicit:
+The connection model makes the following explicit:
 
 ```text
 auth_mode            pasted_secret | provider_oauth | shared_local_session | local_cli_oauth
