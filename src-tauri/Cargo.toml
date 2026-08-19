@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage-dashboard"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first AI account usage and balance monitor"
 authors = ["AI Usage Dashboard contributors"]
 license = "MIT"
@@ -30,5 +30,8 @@ keyring = { version = "3", features = ["windows-native"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "process", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "sync", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+sha2 = "0.10"
+url = "2"

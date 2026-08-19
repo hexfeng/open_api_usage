@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
+import { toProviderAccount, type NativeAccountSnapshot } from "./bridge";
 
 describe("AI Usage Dashboard", () => {
   beforeEach(() => localStorage.clear());
@@ -34,6 +35,14 @@ describe("AI Usage Dashboard", () => {
     expect(document.body.textContent).toContain("Organization");
     expect(document.body.textContent).toContain("Codex only");
     expect(document.body.textContent).toContain("Gemini CLI only");
+  });
+
+  it("renders subscription bars as remaining quota", () => {
+    render(<App />);
+    const value = screen.getByText("58%");
+    const quota = value.closest(".quota");
+    expect(quota).toHaveTextContent("5-hour remaining");
+    expect(quota?.querySelector(".progress-track > span")).toHaveStyle({ width: "58%" });
   });
 
   it("derives account summaries from provider metrics", () => {
@@ -78,5 +87,70 @@ describe("AI Usage Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(screen.getByRole("heading", { name: "ChatGPT Plus" })).toBeInTheDocument();
     expect(document.body.textContent).toContain("ChatGPT Pro");
+  });
+
+  it("requires explicit confirmation for a detected Codex identity", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    fireEvent.click(screen.getByRole("button", { name: /Add account/i }));
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "chatgpt-codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Detect account" }));
+    expect(await screen.findByText("user@example.com")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in with another account" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use this account" })).toBeEnabled();
+    expect(document.body.textContent).toContain("Codex only");
+  });
+
+  it("makes OpenRouter PKCE the preferred path without inventing state validation", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    fireEvent.click(screen.getByRole("button", { name: /Add account/i }));
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "openrouter" } });
+    expect(screen.getByLabelText("Connection method")).toHaveValue("oauth");
+    expect(screen.getByRole("button", { name: "Connect with OpenRouter" })).toBeInTheDocument();
+    expect(document.body.textContent).toContain("does not define OAuth state");
+    expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();
+  });
+
+  it("converts stored Codex used percentages to remaining percentages for display", () => {
+    const snapshot: NativeAccountSnapshot = {
+      account: {
+        id: "codex", providerId: "chatgpt-codex", displayName: "Codex", enabled: true,
+        source: "cliOauth", scope: "Codex only", accountType: "subscription", authMode: "sharedLocalSession", credentialOwner: "codex",
+        consentedAt: "2026-08-19T00:00:00Z", lastValidatedAt: "2026-08-19T00:00:00Z",
+      },
+      result: {
+        providerId: "chatgpt-codex", status: "Live", observedAt: "2026-08-19T00:00:00Z", diagnostic: "Codex quota", historyBuckets: [],
+        metrics: [{ kind: "codex_quota_primary", value: 67, unit: "percent_used", scope: "Codex only", window: "7 days", observedAt: "2026-08-19T00:00:00Z", source: "cliOauth" }],
+      },
+      history: {
+        label: "Codex quota usage", basis: "Local Codex quota snapshots", unit: "percent",
+        points: [{ observedAt: "2026-08-18T00:00:00Z", value: 65 }, { observedAt: "2026-08-19T00:00:00Z", value: 67 }],
+      },
+    };
+    const account = toProviderAccount(snapshot);
+    expect(account.metrics[0]).toMatchObject({ label: "7 days remaining", value: "33%", numericValue: 33, unit: "percent_remaining" });
+    expect(account.history).toEqual([35, 33]);
+    expect(account.historyLabel).toBe("Codex quota remaining");
+  });
+
+  it("keeps cached data when authentication expires", () => {
+    const snapshot: NativeAccountSnapshot = {
+      account: {
+        id: "cached", providerId: "deepseek", displayName: "DeepSeek", credentialRef: "opaque-ref", credentialKind: "api_key", enabled: true,
+        source: "officialApi", scope: "Account balance", accountType: "apiPlatform", authMode: "pastedSecret", credentialOwner: "dashboard",
+        consentedAt: "2026-08-19T00:00:00Z", lastValidatedAt: "2026-08-19T00:00:00Z",
+      },
+      result: {
+        providerId: "deepseek", status: "Live", observedAt: "2026-08-19T00:00:00Z", diagnostic: "last success", historyBuckets: [],
+        metrics: [{ kind: "total_balance", value: 10, unit: "currency", currency: "CNY", scope: "Account balance", observedAt: "2026-08-19T00:00:00Z", source: "officialApi" }],
+      },
+      history: { label: "Balance", basis: "Local snapshots", unit: "currency", points: [] },
+      lastError: "Authentication required: DeepSeek rejected or revoked this credential",
+    };
+    const account = toProviderAccount(snapshot);
+    expect(account.status).toBe("Authentication required");
+    expect(account.metrics[0].value).toBe("¥10.00");
+    expect(account.updatedAt).toBe("2026-08-19T00:00:00Z");
   });
 });

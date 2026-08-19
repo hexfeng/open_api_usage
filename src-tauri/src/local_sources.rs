@@ -12,14 +12,106 @@ use tokio::{
 use crate::{
     credentials,
     error::{AppError, AppResult},
-    models::{FetchResult, FetchStrategy, Metric},
+    models::{
+        AuthenticationAvailability, AuthenticationDetection, AuthenticationMode, CredentialOwner,
+        FetchResult, FetchStrategy, Metric,
+    },
 };
 
 const LOCAL_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
 
-pub async fn fetch_codex() -> AppResult<FetchResult> {
+pub async fn detect_codex() -> AppResult<AuthenticationDetection> {
+    let account = codex_account_read().await?;
+    let Some(account) = account.get("account").filter(|value| !value.is_null()) else {
+        return Ok(AuthenticationDetection {
+            provider_id: "chatgpt-codex".into(),
+            availability: AuthenticationAvailability::AuthenticationRequired,
+            authentication_mode: AuthenticationMode::SharedLocalSession,
+            credential_owner: CredentialOwner::Codex,
+            identity_label: None,
+            plan_label: None,
+            scope: "Codex only".into(),
+            diagnostic: "Codex is installed but no ChatGPT subscription session is active.".into(),
+        });
+    };
+    if account.get("type").and_then(Value::as_str) != Some("chatgpt") {
+        return Ok(AuthenticationDetection {
+            provider_id: "chatgpt-codex".into(),
+            availability: AuthenticationAvailability::AuthenticationRequired,
+            authentication_mode: AuthenticationMode::SharedLocalSession,
+            credential_owner: CredentialOwner::Codex,
+            identity_label: None,
+            plan_label: None,
+            scope: "Codex only".into(),
+            diagnostic: "Codex is not signed in with a ChatGPT subscription account.".into(),
+        });
+    }
+    Ok(codex_detection(account))
+}
+
+pub(crate) fn codex_detection(account: &Value) -> AuthenticationDetection {
+    AuthenticationDetection {
+        provider_id: "chatgpt-codex".into(),
+        availability: AuthenticationAvailability::ExistingSession,
+        authentication_mode: AuthenticationMode::SharedLocalSession,
+        credential_owner: CredentialOwner::Codex,
+        identity_label: account.get("email").and_then(Value::as_str).map(str::to_owned),
+        plan_label: account
+            .get("planType")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        scope: "Codex only".into(),
+        diagnostic: "Shared Codex session detected. Confirm this identity before monitoring; removing it from the dashboard will not sign out Codex.".into(),
+    }
+}
+
+async fn codex_account_read() -> AppResult<Value> {
     let executable = codex_executable();
-    let mut command = Command::new(&executable);
+    let mut command = codex_command(&executable);
+    let mut child = command.spawn().map_err(|error| {
+        AppError::InvalidRequest(format!(
+            "Codex CLI could not be started from {}: {error}",
+            executable.display()
+        ))
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AppError::InvalidResponse("Codex app-server stdin missing".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::InvalidResponse("Codex app-server stdout missing".into()))?;
+    let exchange = timeout(LOCAL_SOURCE_TIMEOUT, async {
+        write_codex_messages(
+            &mut stdin,
+            &[
+                initialize_message(),
+                json!({"method":"initialized"}),
+                json!({"method":"account/read","id":2,"params":{"refreshToken":false}}),
+            ],
+        )
+        .await?;
+        let mut lines = BufReader::new(stdout).lines();
+        loop {
+            let line = lines.next_line().await?.ok_or_else(|| {
+                AppError::InvalidResponse("Codex app-server closed before account/read".into())
+            })?;
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("id").and_then(Value::as_i64) == Some(2) {
+                break rpc_result(message, "account/read");
+            }
+        }
+    })
+    .await;
+    let _ = child.kill().await;
+    exchange.map_err(|_| AppError::InvalidResponse("Codex account detection timed out".into()))?
+}
+
+pub(crate) fn codex_command(executable: &PathBuf) -> Command {
+    let mut command = Command::new(executable);
     command
         .args(["-s", "read-only", "-a", "untrusted", "app-server"])
         .stdin(Stdio::piped())
@@ -28,6 +120,28 @@ pub async fn fetch_codex() -> AppResult<FetchResult> {
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
+    command
+}
+
+pub(crate) fn initialize_message() -> Value {
+    json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"ai_usage_dashboard","title":"AI Usage Dashboard","version":env!("CARGO_PKG_VERSION")}}})
+}
+
+pub(crate) async fn write_codex_messages(
+    stdin: &mut tokio::process::ChildStdin,
+    messages: &[Value],
+) -> AppResult<()> {
+    for message in messages {
+        stdin.write_all(message.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+    }
+    stdin.flush().await?;
+    Ok(())
+}
+
+pub async fn fetch_codex() -> AppResult<FetchResult> {
+    let executable = codex_executable();
+    let mut command = codex_command(&executable);
 
     let mut child = command.spawn().map_err(|error| {
         AppError::InvalidRequest(format!(
@@ -45,23 +159,25 @@ pub async fn fetch_codex() -> AppResult<FetchResult> {
         .ok_or_else(|| AppError::InvalidResponse("Codex app-server stdout missing".into()))?;
 
     let exchange = timeout(LOCAL_SOURCE_TIMEOUT, async {
-        for message in [
-            json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"ai_usage_dashboard","title":"AI Usage Dashboard","version":env!("CARGO_PKG_VERSION")}}}),
-            json!({"method":"initialized"}),
-            json!({"method":"account/read","id":2,"params":{"refreshToken":false}}),
-            json!({"method":"account/rateLimits/read","id":3}),
-        ] {
-            stdin.write_all(message.to_string().as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-        }
-        stdin.flush().await?;
+        write_codex_messages(
+            &mut stdin,
+            &[
+                initialize_message(),
+                json!({"method":"initialized"}),
+                json!({"method":"account/read","id":2,"params":{"refreshToken":false}}),
+                json!({"method":"account/rateLimits/read","id":3}),
+            ],
+        )
+        .await?;
 
         let mut account = None;
         let mut limits = None;
         let mut lines = BufReader::new(stdout).lines();
         while account.is_none() || limits.is_none() {
             let line = lines.next_line().await?.ok_or_else(|| {
-                AppError::InvalidResponse("Codex app-server closed before returning quota data".into())
+                AppError::InvalidResponse(
+                    "Codex app-server closed before returning quota data".into(),
+                )
             })?;
             let message: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
@@ -73,7 +189,10 @@ pub async fn fetch_codex() -> AppResult<FetchResult> {
                 _ => {}
             }
         }
-        Ok::<_, AppError>((account.expect("account response"), limits.expect("limits response")))
+        Ok::<_, AppError>((
+            account.expect("account response"),
+            limits.expect("limits response"),
+        ))
     })
     .await;
     let _ = child.kill().await;
@@ -82,7 +201,7 @@ pub async fn fetch_codex() -> AppResult<FetchResult> {
     parse_codex(&account, &limits)
 }
 
-fn rpc_result(message: Value, method: &str) -> AppResult<Value> {
+pub(crate) fn rpc_result(message: Value, method: &str) -> AppResult<Value> {
     if let Some(error) = message.get("error") {
         let detail = error
             .get("message")
@@ -188,17 +307,88 @@ fn parse_codex(account: &Value, response: &Value) -> AppResult<FetchResult> {
     })
 }
 
+pub async fn detect_gemini_cli() -> AppResult<AuthenticationDetection> {
+    if !gemini_cli_installed().await {
+        return Ok(AuthenticationDetection {
+            provider_id: "google-gemini-cli".into(),
+            availability: AuthenticationAvailability::NotInstalled,
+            authentication_mode: AuthenticationMode::LocalCliOauth,
+            credential_owner: CredentialOwner::GeminiCli,
+            identity_label: None,
+            plan_label: None,
+            scope: "Gemini CLI only".into(),
+            diagnostic: "Gemini CLI is not installed. Install the official CLI, run gemini, and choose Sign in with Google.".into(),
+        });
+    }
+    if gemini_credential_text()?.is_none() {
+        return Ok(AuthenticationDetection {
+            provider_id: "google-gemini-cli".into(),
+            availability: AuthenticationAvailability::AuthenticationRequired,
+            authentication_mode: AuthenticationMode::LocalCliOauth,
+            credential_owner: CredentialOwner::GeminiCli,
+            identity_label: None,
+            plan_label: None,
+            scope: "Gemini CLI only".into(),
+            diagnostic: "Gemini CLI is installed but signed out. Run gemini and choose Sign in with Google, then check again.".into(),
+        });
+    }
+    match gemini_session().await {
+        Ok((load, _)) => Ok(AuthenticationDetection {
+            provider_id: "google-gemini-cli".into(),
+            availability: AuthenticationAvailability::ExistingSession,
+            authentication_mode: AuthenticationMode::LocalCliOauth,
+            credential_owner: CredentialOwner::GeminiCli,
+            identity_label: gemini_identity(&load),
+            plan_label: load
+                .pointer("/paidTier/name")
+                .or_else(|| load.pointer("/currentTier/name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            scope: "Gemini CLI only · Experimental".into(),
+            diagnostic: "Gemini CLI session detected. Confirm this identity before monitoring; the dashboard does not copy its OAuth token or sign out the CLI when removed.".into(),
+        }),
+        Err(error) => {
+            let detail = error.to_string();
+            let invalid = detail.contains("HTTP 401")
+                || detail.contains("HTTP 403")
+                || detail.contains("refresh token missing")
+                || detail.contains("access token missing")
+                || detail.contains("credential file is invalid");
+            Ok(AuthenticationDetection {
+                provider_id: "google-gemini-cli".into(),
+                availability: if invalid {
+                    AuthenticationAvailability::CredentialInvalid
+                } else {
+                    AuthenticationAvailability::Unavailable
+                },
+                authentication_mode: AuthenticationMode::LocalCliOauth,
+                credential_owner: CredentialOwner::GeminiCli,
+                identity_label: None,
+                plan_label: None,
+                scope: "Gemini CLI only · Experimental".into(),
+                diagnostic: if invalid {
+                    "Gemini CLI credentials are present but invalid or no longer accepted. Sign in again in the official CLI.".into()
+                } else {
+                    "Gemini CLI is installed, but its session could not be validated because the provider or Experimental quota contract is unavailable.".into()
+                },
+            })
+        }
+    }
+}
+
 pub async fn fetch_gemini_cli() -> AppResult<FetchResult> {
+    let (load, quota) = gemini_session().await?;
+    parse_gemini_cli(&load, &quota)
+}
+
+async fn gemini_session() -> AppResult<(Value, Value)> {
     let credential_path = gemini_oauth_path()?;
-    let credential_text = match credentials::read_external("gemini-cli-oauth", "main-account")? {
-        Some(value) => value,
-        None => std::fs::read_to_string(&credential_path).map_err(|_| {
+    let credential_text = gemini_credential_text()?.ok_or_else(|| {
             AppError::InvalidRequest(format!(
                 "Gemini CLI OAuth credentials were not found in Windows Credential Manager or at {}; install Gemini CLI and sign in with Google first",
                 credential_path.display()
             ))
-        })?,
-    };
+        })?;
     let credentials: Value = serde_json::from_str(&credential_text).map_err(|_| {
         AppError::InvalidResponse("Gemini CLI OAuth credential file is invalid".into())
     })?;
@@ -235,7 +425,68 @@ pub async fn fetch_gemini_cli() -> AppResult<FetchResult> {
     )
     .await?;
     drop(access_token);
-    parse_gemini_cli(&load, &quota)
+    Ok((load, quota))
+}
+
+fn gemini_credential_text() -> AppResult<Option<String>> {
+    if let Some(value) = credentials::read_external("gemini-cli-oauth", "main-account")? {
+        return Ok(Some(value));
+    }
+    let path = gemini_oauth_path()?;
+    match std::fs::read_to_string(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn gemini_cli_installed() -> bool {
+    let executable = if cfg!(windows) {
+        "gemini.cmd"
+    } else {
+        "gemini"
+    };
+    if matches!(
+        timeout(Duration::from_secs(5), Command::new(executable).arg("--version").output()).await,
+        Ok(Ok(output)) if output.status.success()
+    ) {
+        return true;
+    }
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let Ok(Ok(output)) = timeout(
+        Duration::from_secs(5),
+        Command::new(npm).args(["root", "-g"]).output(),
+    )
+    .await
+    else {
+        return false;
+    };
+    output.status.success()
+        && PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+            .join("@google")
+            .join("gemini-cli")
+            .join("package.json")
+            .is_file()
+}
+
+fn gemini_identity(load: &Value) -> Option<String> {
+    [
+        "/email",
+        "/user/email",
+        "/account/email",
+        "/currentUser/email",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        load.pointer(path)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .or_else(|| {
+        load.get("cloudaicompanionProject")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 async fn gemini_access_token(credentials: &Value) -> AppResult<String> {
@@ -415,7 +666,7 @@ fn parse_gemini_cli(load: &Value, quota: &Value) -> AppResult<FetchResult> {
     })
 }
 
-fn codex_executable() -> PathBuf {
+pub(crate) fn codex_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEX_CLI_PATH").map(PathBuf::from) {
         if path.is_file() {
             return path;
@@ -521,5 +772,19 @@ mod tests {
             .metrics
             .iter()
             .any(|metric| metric.kind == "codex_quota_primary"));
+    }
+
+    #[test]
+    #[ignore = "requires a locally signed-in Codex installation"]
+    fn detects_live_codex_identity_before_consent() {
+        let detection = tauri::async_runtime::block_on(detect_codex()).unwrap();
+        assert_eq!(
+            detection.availability,
+            AuthenticationAvailability::ExistingSession
+        );
+        assert_eq!(detection.scope, "Codex only");
+        assert_eq!(detection.credential_owner, CredentialOwner::Codex);
+        assert!(detection.identity_label.is_some());
+        assert!(detection.plan_label.is_some());
     }
 }

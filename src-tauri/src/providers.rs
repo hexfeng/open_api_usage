@@ -119,14 +119,21 @@ async fn fetch_openai(admin_key: &str) -> AppResult<FetchResult> {
         &http,
         &format!("https://api.openai.com/v1/organization/costs?start_time={start_time}&limit=31"),
         admin_key,
+        "OpenAI",
     )
     .await?;
-    let usage = get_json(&http, &format!("https://api.openai.com/v1/organization/usage/completions?start_time={start_time}&bucket_width=1d&limit=31"), admin_key).await?;
+    let usage = get_json(&http, &format!("https://api.openai.com/v1/organization/usage/completions?start_time={start_time}&bucket_width=1d&limit=31"), admin_key, "OpenAI").await?;
     parse_openai(&costs, &usage)
 }
 
 async fn fetch_deepseek(api_key: &str) -> AppResult<FetchResult> {
-    let json = get_json(&client()?, "https://api.deepseek.com/user/balance", api_key).await?;
+    let json = get_json(
+        &client()?,
+        "https://api.deepseek.com/user/balance",
+        api_key,
+        "DeepSeek",
+    )
+    .await?;
     parse_deepseek(&json)
 }
 
@@ -136,7 +143,7 @@ async fn fetch_openrouter(api_key: &str, credential_kind: Option<&str>) -> AppRe
     } else {
         "https://openrouter.ai/api/v1/key"
     };
-    let json = get_json(&client()?, endpoint, api_key).await?;
+    let json = get_json(&client()?, endpoint, api_key, "OpenRouter").await?;
     parse_openrouter(&json, credential_kind == Some("management"))
 }
 
@@ -148,22 +155,29 @@ async fn fetch_google_ai_studio(api_key: &str) -> AppResult<FetchResult> {
         .await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(AppError::InvalidResponse(format!(
-            "Google AI Studio returned HTTP {status}"
-        )));
+        return Err(provider_http_error("Google AI Studio", status));
     }
     parse_google_ai_studio(&response.json().await?)
 }
 
-async fn get_json(http: &Client, url: &str, credential: &str) -> AppResult<Value> {
+async fn get_json(http: &Client, url: &str, credential: &str, provider: &str) -> AppResult<Value> {
     let response = http.get(url).bearer_auth(credential).send().await?;
     let status = response.status();
     if !status.is_success() {
-        return Err(AppError::InvalidResponse(format!(
-            "provider returned HTTP {status}"
-        )));
+        return Err(provider_http_error(provider, status));
     }
     Ok(response.json().await?)
+}
+
+fn provider_http_error(provider: &str, status: reqwest::StatusCode) -> AppError {
+    let message = match status.as_u16() {
+        401 => format!("Authentication required: {provider} rejected or revoked this credential"),
+        402 => format!("Insufficient balance: {provider} accepted the credential but the account has insufficient balance"),
+        403 => format!("Insufficient permission: {provider} accepted the credential but it lacks the required scope or role"),
+        429 => format!("Rate limited: {provider} temporarily rejected the request"),
+        _ => format!("{provider} returned HTTP {status}"),
+    };
+    AppError::InvalidResponse(message)
 }
 
 fn observed() -> String {
@@ -586,5 +600,29 @@ mod tests {
             .metrics
             .iter()
             .any(|metric| { metric.kind.contains("balance") || metric.kind.contains("spend") }));
+    }
+
+    #[test]
+    fn provider_failures_have_distinct_safe_diagnostics() {
+        assert!(
+            provider_http_error("OpenAI", reqwest::StatusCode::UNAUTHORIZED)
+                .to_string()
+                .contains("Authentication required")
+        );
+        assert!(
+            provider_http_error("OpenAI", reqwest::StatusCode::FORBIDDEN)
+                .to_string()
+                .contains("Insufficient permission")
+        );
+        assert!(
+            provider_http_error("DeepSeek", reqwest::StatusCode::PAYMENT_REQUIRED)
+                .to_string()
+                .contains("Insufficient balance")
+        );
+        assert!(
+            provider_http_error("OpenRouter", reqwest::StatusCode::TOO_MANY_REQUESTS)
+                .to_string()
+                .contains("Rate limited")
+        );
     }
 }
