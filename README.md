@@ -17,6 +17,7 @@ Local-first Windows desktop dashboard for monitoring personal AI API accounts an
 - Persisted account enablement, credential replacement and refresh/history/Windows behavior settings.
 - Google AI Studio API and Gemini CLI subscription accounts are stored and displayed separately.
 - Codex and Gemini subscription scopes are explicit and never described as full ChatGPT or Google AI entitlement usage.
+- Provider authentication is intentionally split between pasted secrets, provider-managed browser authorization and confirmed local CLI sessions; there is no universal login flow.
 
 ## Run
 
@@ -46,4 +47,4 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 The application is read-only toward providers. It does not proxy API traffic, manage provider keys, rotate credentials, recharge accounts or log prompt/request content. Codex is queried through its local read-only app-server. Gemini CLI OAuth is read only after the user explicitly adds that account; raw OAuth credentials never enter SQLite or logs.
 
-See [Capability Matrix](docs/CAPABILITY_MATRIX.md), [Architecture](docs/ARCHITECTURE.md), and [Development Plan](docs/DEVELOPMENT.md).
+See [Authentication and Connection Design](docs/AUTHENTICATION.md), [Capability Matrix](docs/CAPABILITY_MATRIX.md), [Architecture](docs/ARCHITECTURE.md), and [Development Plan](docs/DEVELOPMENT.md).

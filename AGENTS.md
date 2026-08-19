@@ -1,5 +1,14 @@
 # Prototype Instructions
 
+## Durable product authentication decisions
+
+- Do not model every provider connection as a generic login. Distinguish pasted API/Admin/Management keys, provider-managed browser OAuth, confirmed shared local sessions and local CLI OAuth reuse.
+- A detected Codex or Gemini local session must be shown to the user and explicitly confirmed before connection in the product flow, even when no new browser login is technically required.
+- Codex product login should use the official App Server browser flow with device-code fallback; do not construct OpenAI OAuth URLs or read Codex token files.
+- OpenRouter should prefer official PKCE for normal user-controlled keys while keeping Management keys as a separate advanced path.
+- Removing a dashboard account must not automatically revoke a provider key or sign out a shared Codex/Gemini client.
+- Keep Gemini CLI quota integration Experimental until its local/internal contract is proven stable enough for release.
+
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 
 Before making substantial visual changes, use the Product Design plugin's `get-context` skill when the visual source is unclear or no longer matches the current goal. When the user gives durable prototype-specific design feedback, preferences, or decisions, record them in `AGENTS.md`.
