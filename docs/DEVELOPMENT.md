@@ -26,6 +26,18 @@
 
 The detailed implementation contract is in [Authentication and Connection Design](AUTHENTICATION.md).
 
+## Implemented frontend interaction direction
+
+The next frontend pass is defined in [Frontend Interaction Design](INTERACTION_DESIGN.md):
+
+- Dashboard becomes the only primary page.
+- Connections and Settings move to compact header icon controls and lightweight overlays.
+- Dashboard exposes Add account directly and existing account cards/rows open account detail directly.
+- Add account progresses through account type, visible provider selection and provider-specific connection; it no longer starts with one all-provider dropdown.
+- Account list, detail, add, edit, credential replacement and removal share one Connections dialog shell instead of stacking pages and modals.
+
+These interaction decisions are implemented in the current frontend working tree. Automated tests cover the single-page shell, overlays, direct detail/edit entry, progressive category/provider selection, explicit Codex confirmation and OpenRouter PKCE preference. Provider-backed authentication remains subject to the external acceptance below.
+
 ## External acceptance still required
 
 - Reconcile each rendered metric value and time window against the user's official provider dashboard; live authentication/display is confirmed.

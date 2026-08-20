@@ -5,7 +5,7 @@ Local-first Windows desktop dashboard for monitoring personal AI API accounts an
 ## Current MVP
 
 - Windows 11 desktop shell: Tauri 2 + React/TypeScript + Rust.
-- Dashboard, Accounts and Settings only.
+- Dashboard is the only primary page. Connections and Settings open from compact header controls as lightweight overlays, while Dashboard cards and rows open account detail directly.
 - Dark/light themes and list/card provider layouts, persisted locally.
 - Official API adapters for OpenAI organization usage, DeepSeek balance, OpenRouter key/account usage and Google AI Studio API-key validation.
 - Local subscription adapters for ChatGPT/Codex app-server quota and Gemini CLI OAuth model quota.
@@ -49,4 +49,4 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 The application is read-only toward providers. It does not proxy API traffic, manage provider keys, rotate credentials, recharge accounts or log prompt/request content. Codex is queried through its local read-only app-server. Gemini CLI OAuth is read only after the user explicitly adds that account; raw OAuth credentials never enter SQLite or logs.
 
-See [Authentication and Connection Design](docs/AUTHENTICATION.md), [Capability Matrix](docs/CAPABILITY_MATRIX.md), [Architecture](docs/ARCHITECTURE.md), and [Development Plan](docs/DEVELOPMENT.md).
+See [Frontend Interaction Design](docs/INTERACTION_DESIGN.md), [Authentication and Connection Design](docs/AUTHENTICATION.md), [Capability Matrix](docs/CAPABILITY_MATRIX.md), [Architecture](docs/ARCHITECTURE.md), and [Development Plan](docs/DEVELOPMENT.md).
