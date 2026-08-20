@@ -8,6 +8,9 @@
 - OpenRouter should prefer official PKCE for normal user-controlled keys while keeping Management keys as a separate advanced path.
 - Removing a dashboard account must not automatically revoke a provider key or sign out a shared Codex/Gemini client.
 - Keep Gemini CLI quota integration Experimental until its local/internal contract is proven stable enough for release.
+- Keep Dashboard as the only primary product page. Accounts and Settings are lightweight, low-frequency management surfaces and should be opened from compact header icon controls as overlays rather than treated as peer top-level navigation pages.
+- Dashboard must expose a direct Add account action, and clicking an account card or row must open that account's detail/manage state without routing through a separate Accounts page.
+- Add account is a progressive overlay flow: choose API Platform or Subscription, choose a provider from a visible provider list, then complete the provider-specific connection. Do not use one all-provider dropdown as the primary selection interaction.
 
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 

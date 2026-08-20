@@ -22,12 +22,34 @@ describe("AI Usage Dashboard", () => {
     expect(localStorage.getItem("aud-theme")).toBe("light");
   });
 
-  it("navigates to account and settings views", () => {
+  it("opens connections and settings as lightweight dialogs from Dashboard", () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    expect(screen.getByRole("heading", { name: "Accounts" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI Usage Dashboard" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
+    expect(screen.getByRole("dialog", { name: "Accounts" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close connections" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("starts Add account directly from Dashboard with an account-type choice", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Add account" }));
+    expect(screen.getByRole("heading", { name: "What do you want to connect?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /API Platform.*API spend/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Subscription.*Quota/ })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Provider")).not.toBeInTheDocument();
+  });
+
+  it("does not silently discard an entered credential", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Add account" }));
+    fireEvent.click(screen.getByRole("button", { name: /API Platform.*API spend/ }));
+    fireEvent.click(screen.getByRole("button", { name: /OpenAI API.*Organization Costs/ }));
+    fireEvent.change(screen.getByLabelText("Organization Admin Key"), { target: { value: "sk-preview-not-real" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close connections" }));
+    expect(screen.getByRole("dialog", { name: "Discard this connection setup?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Keep editing" })).toBeInTheDocument();
   });
 
   it("keeps API and subscription scope labels explicit", () => {
@@ -55,58 +77,58 @@ describe("AI Usage Dashboard", () => {
 
   it("shows the stored history basis in account details", () => {
     render(<App />);
-    fireEvent.click(screen.getByText("OpenAI API").closest("article")!);
+    fireEvent.click(screen.getByRole("button", { name: "Open OpenAI API details" }));
     expect(screen.getByRole("heading", { name: "Daily spend" })).toBeInTheDocument();
     expect(screen.getByText("Provider history buckets")).toBeInTheDocument();
   });
 
   it("edits an account name without replacing its credential", () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit OpenAI API" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open OpenAI API details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit details" }));
     const name = screen.getByLabelText("Account name");
     fireEvent.change(name, { target: { value: "Primary OpenAI" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(screen.getByRole("heading", { name: "Primary OpenAI" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Primary OpenAI" })).toBeInTheDocument();
   });
 
   it("keeps Google AI Studio API and Gemini CLI as separate account types", () => {
     render(<App />);
     expect(screen.getByText("Google AI Studio API")).toBeInTheDocument();
     expect(screen.getByText("Google AI Pro")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    expect(screen.getByRole("table", { name: "API platform accounts" })).toHaveTextContent("Google AI Studio API");
-    expect(screen.getByRole("table", { name: "Subscription accounts" })).toHaveTextContent("Google AI Pro");
+    fireEvent.click(screen.getByRole("button", { name: "Open connections" }));
+    expect(screen.getByRole("button", { name: /Google AI Studio API.*API key/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Google AI Pro.*Gemini CLI quota/ })).toBeInTheDocument();
   });
 
   it("edits manual subscription metadata independently of automatic quota", () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit ChatGPT Plus" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open ChatGPT Plus details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit details" }));
     fireEvent.change(screen.getByLabelText("Plan name · Manual"), { target: { value: "ChatGPT Pro" } });
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-    expect(screen.getByRole("heading", { name: "ChatGPT Plus" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "ChatGPT Plus" })).toBeInTheDocument();
     expect(document.body.textContent).toContain("ChatGPT Pro");
   });
 
   it("requires explicit confirmation for a detected Codex identity", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    fireEvent.click(screen.getByRole("button", { name: /Add account/i }));
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "chatgpt-codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add account" }));
+    fireEvent.click(screen.getByRole("button", { name: /Subscription.*Quota/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ChatGPT \/ Codex.*Codex quota/ }));
     fireEvent.click(screen.getByRole("button", { name: "Detect account" }));
     expect(await screen.findByText("user@example.com")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in with another account" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Use this account" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Connect this account" })).toBeEnabled();
     expect(document.body.textContent).toContain("Codex only");
   });
 
   it("makes OpenRouter PKCE the preferred path without inventing state validation", () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
-    fireEvent.click(screen.getByRole("button", { name: /Add account/i }));
-    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "openrouter" } });
-    expect(screen.getByLabelText("Connection method")).toHaveValue("oauth");
+    fireEvent.click(screen.getByRole("button", { name: "Add account" }));
+    fireEvent.click(screen.getByRole("button", { name: /API Platform.*API spend/ }));
+    fireEvent.click(screen.getByRole("button", { name: /OpenRouter.*Key usage/ }));
+    expect(screen.getByRole("radio", { name: /Connect with OpenRouter.*Recommended/ })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("button", { name: "Connect with OpenRouter" })).toBeInTheDocument();
     expect(document.body.textContent).toContain("does not define OAuth state");
     expect(screen.queryByLabelText("API Key")).not.toBeInTheDocument();

@@ -1,5 +1,7 @@
 # Design QA
 
+> The detailed comparison below records the original three-page baseline. The current single-Dashboard interaction update is documented in `docs/INTERACTION_DESIGN.md` and was live-checked on 2026-08-20 at 1440 × 1024 and at a 1152 × 819 Windows high-DPI equivalent, including Dashboard, Connections, Settings, account detail, Add account category/provider steps, light/dark and list/card states. The high-DPI pass found and fixed an API-row action overlap.
+
 **Source visual truth**
 
 - Dark list: `D:\Projects\AI_usage_dashboard\design\reference-dark-list.png`

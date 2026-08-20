@@ -51,6 +51,21 @@ Connected   -> Authentication required (credential expired, revoked or signed ou
 
 Connection-dialog states such as `Detecting`, `Consent required`, `Authorizing` and `Cancelled` are implemented interaction states. Persisted account statuses remain `Live`, `Refreshing`, `Stale`, `Authentication required`, `Unavailable` and `Experimental`.
 
+### 4.1 Connection entry and progressive selection
+
+The frontend keeps Dashboard as the only primary page and exposes `Add account` directly on Dashboard. The same Connections overlay is also reachable through a compact header icon or by clicking an existing account.
+
+Adding an account proceeds in this order:
+
+1. Choose `API Platform` or `Subscription`.
+2. Choose a provider from visible provider items filtered by that category.
+3. Complete the provider-specific credential, browser authorization or confirmed local-session flow.
+4. Test or detect the connection, display identity and scope when available, then explicitly save/connect.
+
+The primary flow does not use one all-provider dropdown. This keeps account type and scope understandable and allows the provider catalog to grow without turning one select control into the product's information architecture.
+
+See [Frontend Interaction Design](INTERACTION_DESIGN.md) for the complete overlay, Dashboard entry, account detail and edit behavior.
+
 Every successful connection must record or derive:
 
 ```text
